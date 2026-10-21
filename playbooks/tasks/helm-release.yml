@@ -1,0 +1,72 @@
+# Install or upgrade one Helm release, only when the chart version or values differ.
+# Vars: release, ns, chart, version, wait_timeout (default 10m)
+#       values        - values file under files/ (staged to the master), or
+#       remote_values - values file already on the master, with values_dict = its parsed content
+#       secret_values - dict merged on top (optional, never logged or kept on disk)
+- name: "Stage values for {{ release }}"
+  ansible.builtin.copy:
+    src: "../files/{{ values }}"
+    dest: "{{ config_dir }}/{{ values }}"
+    mode: "0644"
+  when: values is defined
+  check_mode: false
+
+- name: "Read deployed state of {{ release }}"
+  ansible.builtin.shell: |
+    helm list -n {{ ns }} -f '^{{ release }}$' -o json
+    echo '---'
+    helm get values {{ release }} -n {{ ns }} -o json 2>/dev/null || echo null
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: helm_state
+  changed_when: false
+  no_log: "{{ secret_values is defined }}"
+  check_mode: false
+
+- name: "Compare {{ release }} with the desired state"
+  ansible.builtin.set_fact:
+    helm_needs_update: >-
+      {{ (_listed | length == 0)
+         or (_listed[0].chart not in [_chart ~ '-' ~ version, _chart ~ '-' ~ (version | regex_replace('^v', ''))])
+         or (_listed[0].status != 'deployed')
+         or ((_live or {}) != _desired) }}
+  vars:
+    _chart: "{{ chart | basename }}"
+    _parts: "{{ helm_state.stdout.split('---') }}"
+    _listed: "{{ _parts[0] | from_json }}"
+    _live: "{{ _parts[1] | trim | from_json }}"
+    _file: "{{ values_dict if values_dict is defined else ((lookup('file', '../files/' ~ values) | from_yaml) if values is defined else {}) }}"
+    _desired: "{{ (_file or {}) | combine(secret_values | default({}), recursive=true) }}"
+  no_log: "{{ secret_values is defined }}"
+
+- name: "Report {{ release }}"
+  ansible.builtin.debug:
+    msg: "{{ release }}: {{ 'will be installed/upgraded' if helm_needs_update else 'up to date' }}"
+  changed_when: helm_needs_update
+
+- name: "Write secret values for {{ release }}"
+  ansible.builtin.copy:
+    content: "{{ secret_values | to_nice_yaml }}"
+    dest: "{{ config_dir }}/.secret-{{ release }}-values.yaml"
+    mode: "0600"
+  no_log: true
+  when: secret_values is defined and helm_needs_update
+  check_mode: false
+
+- name: "helm upgrade --install {{ release }} {{ version }}"
+  ansible.builtin.command: >-
+    helm upgrade --install {{ release }} {{ chart }} --version {{ version }}
+    -n {{ ns }} --create-namespace --wait --timeout {{ wait_timeout | default('10m') }}
+    {% if values is defined %}-f {{ config_dir }}/{{ values }}{% endif %}
+    {% if remote_values is defined %}-f {{ remote_values }}{% endif %}
+    {% if secret_values is defined %}-f {{ config_dir }}/.secret-{{ release }}-values.yaml{% endif %}
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  when: helm_needs_update
+
+- name: "Remove secret values for {{ release }}"
+  ansible.builtin.file:
+    path: "{{ config_dir }}/.secret-{{ release }}-values.yaml"
+    state: absent
+  when: secret_values is defined
+  check_mode: false

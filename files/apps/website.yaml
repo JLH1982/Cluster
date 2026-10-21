@@ -1,0 +1,78 @@
+# Portfolio website: https://portfolio.hinkel-net.com (via the Cloudflare tunnel)
+# Site files live on the website-pvc volume (restored by playbooks/restore-data.yml).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: website-pvc
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 55Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: website
+  namespace: default
+spec:
+  replicas: 1
+  # RWO volume: stop the old pod before starting the new one
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  selector:
+    matchLabels:
+      app: website
+  template:
+    metadata:
+      labels:
+        app: website
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: website
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: website
+          persistentVolumeClaim:
+            claimName: website-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: website
+  namespace: default
+spec:
+  selector:
+    app: website
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: website
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: portfolio.hinkel-net.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: website
+                port:
+                  number: 80

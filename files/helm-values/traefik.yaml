@@ -1,0 +1,4 @@
+service:
+  annotations:
+    # Keep the same LAN IP after a rebuild: Cloudflare tunnel routes point at it
+    metallb.io/loadBalancerIPs: 10.0.20.230

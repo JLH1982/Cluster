@@ -1,0 +1,75 @@
+# Restore app data from a laptop backup into a (re)built cluster.
+#   ansible-playbook playbooks/restore-data.yml -e backup=backups/2026-10-20-1830 -e confirm=yes
+# Optional: -e only=home-assistant,immich-db  (restore just those items)
+# Each app is stopped, its volume is wiped and refilled from the backup, and it is started again.
+- name: Restore app data
+  hosts: k3s_init
+  become: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  vars:
+    src_dir: "{{ backup | mandatory('Pass -e backup=<backup folder>') }}"
+    only_list: "{{ (only | default('')).split(',') | select | list }}"
+    stage: /root/restore
+    pvc_restores:
+      - {name: home-assistant, file: home-assistant.tgz, ns: home-assistant, deploy: home-assistant, pvc: home-assistant-config}
+      - {name: zwave-js-ui, file: zwave-js-ui.tgz, ns: home-assistant, deploy: zwave-js-ui, pvc: zwave-js-ui-store}
+      - {name: uptime-kuma, file: uptime-kuma.tgz, ns: uptime-kuma, deploy: uptime-kuma, pvc: uptime-kuma-data}
+      - {name: darkweb-site, file: darkweb-site.tgz, ns: darkweb, deploy: darkweb-website, pvc: darkweb-site}
+      - {name: website, file: website.tgz, ns: default, deploy: website, pvc: website-pvc}
+  tasks:
+    - name: Require confirmation
+      ansible.builtin.assert:
+        that: confirm | default('') == 'yes'
+        fail_msg: "This overwrites live app data. Re-run with -e confirm=yes"
+
+    - name: Create the staging folder
+      ansible.builtin.file:
+        path: "{{ stage }}"
+        state: directory
+        mode: "0700"
+
+    - name: Restore app volumes
+      ansible.builtin.include_tasks: tasks/pvc-restore.yml
+      loop: "{{ pvc_restores }}"
+      loop_control: {loop_var: r, label: "{{ r.name }}"}
+      when:
+        - (src_dir ~ '/' ~ r.file) is file
+        - not only_list or r.name in only_list
+
+    - name: Restore the Immich database
+      when:
+        - (src_dir ~ '/immich-db.dump') is file
+        - not only_list or 'immich-db' in only_list
+      block:
+        - name: Upload the database dump
+          ansible.builtin.copy:
+            src: "{{ src_dir }}/immich-db.dump"
+            dest: "{{ stage }}/immich-db.dump"
+            mode: "0600"
+
+        - name: Stop Immich
+          ansible.builtin.command: kubectl -n immich scale deploy immich-server immich-machine-learning --replicas=0
+
+        - name: Find the database primary
+          ansible.builtin.command: >-
+            kubectl -n immich get clusters.postgresql.cnpg.io immich-database -o jsonpath={.status.currentPrimary}
+          register: pg_primary
+          changed_when: false
+
+        - name: Load the dump
+          ansible.builtin.shell: >-
+            kubectl -n immich exec -i {{ pg_primary.stdout }} -c postgres --
+            pg_restore -U postgres -d immich --clean --if-exists --no-owner --role=immich
+            < {{ stage }}/immich-db.dump
+          register: pg_restore
+          # pg_restore exits 1 on harmless warnings (e.g. objects that did not exist yet)
+          failed_when: pg_restore.rc > 1
+
+        - name: Start Immich
+          ansible.builtin.command: kubectl -n immich scale deploy immich-server immich-machine-learning --replicas=1
+
+    - name: Remove the staging folder
+      ansible.builtin.file:
+        path: "{{ stage }}"
+        state: absent

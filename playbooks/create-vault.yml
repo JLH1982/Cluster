@@ -1,0 +1,40 @@
+# Create (or refresh) the encrypted vault from the running cluster's secrets.
+#   ansible-playbook playbooks/create-vault.yml
+# You are asked for the kube user's sudo password; it is stored in the vault too, so later
+# playbooks don't need to ask. Re-run after changing any secret (e.g. a new tunnel token).
+- name: Create the Ansible vault
+  hosts: k3s_init
+  become: true
+  vars_prompt:
+    - name: become_pass
+      prompt: "sudo password for kube on the Pis"
+      private: true
+  vars:
+    ansible_become_password: "{{ become_pass }}"
+    vault_file: "{{ playbook_dir }}/../inventory/group_vars/all/vault.yml"
+  tasks:
+    - name: Read secrets from the cluster
+      ansible.builtin.script: ../scripts/collect-secrets.py
+      args:
+        executable: python3
+      register: collected
+      changed_when: false
+      no_log: true
+
+    - name: Write the vault (plain text for a moment, encrypted next)
+      ansible.builtin.copy:
+        content: "{{ (collected.stdout | from_yaml) | combine({'vault_become_password': become_pass}) | to_nice_yaml(width=1000) }}"
+        dest: "{{ vault_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Encrypt the vault
+      ansible.builtin.command: ansible-vault encrypt --vault-password-file ~/.ansible/cluster-vault-pass {{ vault_file }}
+      delegate_to: localhost
+      become: false
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "Vault written to {{ vault_file | realpath }} (encrypted with ~/.ansible/cluster-vault-pass)"

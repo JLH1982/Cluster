@@ -1,0 +1,51 @@
+# Cluster-wide settings. Secrets live in vault.yml (encrypted) next to this file.
+
+timezone: America/Chicago
+
+lan_cidr: 10.0.20.0/24
+pod_cidr: 10.42.0.0/16
+service_cidr: 10.43.0.0/16
+metallb_range: 10.0.20.230-10.0.20.239
+traefik_ip: 10.0.20.230
+
+# The first server (inventory group k3s_init) initialises etcd; the others join it.
+k3s_version: v1.36.5+k3s1
+k3s_init_host: "{{ groups['k3s_init'][0] }}"
+k3s_api: "https://{{ hostvars[k3s_init_host].ansible_host }}:6443"
+# false: an existing k3s install is never touched (config or version).
+# true:  re-run the installer at k3s_version on hosts that run a different version.
+k3s_allow_upgrade: false
+
+helm_version: v3.22.0
+etcdctl_version: v3.6.5
+
+# Where manifests and values are copied on the master before being applied
+config_dir: /home/kube/cluster-config
+kubeconfig: /etc/rancher/k3s/k3s.yaml
+
+# ---- Helm releases (installed in this order by playbooks/03-platform.yml) ----
+helm_repos:
+  metallb: https://metallb.github.io/metallb
+  traefik: https://traefik.github.io/charts
+  jetstack: https://charts.jetstack.io
+  longhorn: https://charts.longhorn.io
+  prometheus-community: https://prometheus-community.github.io/helm-charts
+  cnpg: https://cloudnative-pg.github.io/charts
+
+# ---- Apps (playbooks/04-apps.yml) ----
+immich_chart_version: 0.13.4
+# Minimum cloudflared version. The daily cloudflared-auto-update timer moves the cluster past
+# this; the playbook never downgrades a newer running version.
+cloudflared_version: 2026.10.3
+
+# Minimum Immich version. The daily immich-auto-update timer may move the cluster past
+# this; the playbook never downgrades a newer running version.
+immich_version: v3.3.5
+
+# Tor needs a fixed IP for its HiddenServicePort target (hostnames are not allowed there).
+darkweb_service_ip: 10.43.35.70
+
+# Backups (playbooks/backup.yml)
+backup_dir_remote: /home/kube/backups
+backup_keep_remote: 5
+backup_dir_local: "{{ playbook_dir }}/../backups"

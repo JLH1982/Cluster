@@ -1,0 +1,65 @@
+# Managed by Ansible (playbooks/04-apps.yml). immich-auto-update edits the tag line in place.
+controllers:
+  main:
+    containers:
+      main:
+        image:
+          tag: {{ immich_tag }}
+        env:
+          REDIS_HOSTNAME: immich-valkey
+          IMMICH_MACHINE_LEARNING_URL: http://immich-machine-learning:3003
+          DB_HOSTNAME: immich-database-rw
+          DB_USERNAME: immich
+          DB_DATABASE_NAME: immich
+          DB_PASSWORD:
+            valueFrom:
+              secretKeyRef:
+                name: immich-postgres-secret
+                key: password
+
+immich:
+  persistence:
+    library:
+      existingClaim: immich-library
+
+valkey:
+  enabled: true
+
+server:
+  controllers:
+    main:
+      # RWO volumes can only attach to one node: stop the old pod before starting the new one
+      strategy: Recreate
+      containers:
+        main:
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {memory: 2Gi}
+  ingress:
+    main:
+      enabled: true
+      className: traefik
+      annotations:
+        traefik.ingress.kubernetes.io/router.entrypoints: web
+      hosts:
+        - host: photos.hinkel-net.com
+          paths:
+            - path: "/"
+              service:
+                identifier: main
+
+machine-learning:
+  controllers:
+    main:
+      # RWO volumes can only attach to one node: stop the old pod before starting the new one
+      strategy: Recreate
+      containers:
+        main:
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {memory: 3Gi}
+  persistence:
+    cache:
+      enabled: true
+      type: persistentVolumeClaim
+      existingClaim: immich-ml-cache

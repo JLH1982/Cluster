@@ -1,0 +1,7 @@
+[Unit]
+Description=Defragment k3s embedded etcd (one member at a time)
+After=k3s.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "for ep in 10.0.20.242 10.0.20.243 10.0.20.240; do /usr/local/bin/etcdctl --cacert /var/lib/rancher/k3s/server/tls/etcd/server-ca.crt --cert /var/lib/rancher/k3s/server/tls/etcd/server-client.crt --key /var/lib/rancher/k3s/server/tls/etcd/server-client.key --endpoints https://$ep:2379 --command-timeout=120s defrag || exit 1; sleep 15; done"

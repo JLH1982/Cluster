@@ -1,0 +1,97 @@
+#!/bin/bash
+# Immich auto-update (patch releases only), run daily by immich-auto-update.timer.
+#
+# Policy:
+#   - Only upgrades within the current major.minor (e.g. v3.3.4 -> v3.3.5).
+#   - Waits until a release is MIN_AGE_DAYS old (bad releases get pulled quickly).
+#   - Minor/major upgrades (v3.3 -> v3.4) are only logged; do those by hand after
+#     reading the release notes. Immich's web UI also shows a "new version" banner.
+#   - Backs up the database first, verifies the server afterwards, rolls back on failure.
+#
+# Logs: journalctl -u immich-auto-update
+# Dry run: immich-auto-update --dry-run
+# Urgent (security) release: sudo MIN_AGE_DAYS=0 immich-auto-update
+set -euo pipefail
+
+DIR=/home/kube/immich
+VALUES=$DIR/values.yaml
+BACKUPS=$DIR/backups
+CHART=oci://ghcr.io/immich-app/immich-charts/immich
+CHART_VERSION=0.13.4
+NS=immich
+MIN_AGE_DAYS=${MIN_AGE_DAYS:-3}
+KEEP_BACKUPS=10
+HOST=photos.hinkel-net.com
+TRAEFIK=10.0.20.230
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+DRY_RUN=0; [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+log() { echo "$*"; }
+
+CUR=$(grep -oE '^ {10}tag: v[0-9]+\.[0-9]+\.[0-9]+$' "$VALUES" | grep -oE 'v[0-9.]+')
+[ -n "$CUR" ] || { log "ERROR: could not find the server image tag in $VALUES"; exit 1; }
+
+# Pick the newest eligible patch release and note any newer minor/major release.
+read -r TARGET NEWER_MINOR < <(curl -fsS --max-time 30 \
+  "https://api.github.com/repos/immich-app/immich/releases?per_page=30" |
+  python3 -c '
+import json, sys, datetime
+cur, min_age = sys.argv[1], int(sys.argv[2])
+def ver(t): return tuple(int(x) for x in t.lstrip("v").split("."))
+c = ver(cur)
+now = datetime.datetime.now(datetime.timezone.utc)
+target, newer_minor = cur, "-"
+for r in json.load(sys.stdin):
+    t = r["tag_name"]
+    if r["draft"] or r["prerelease"] or t.count(".") != 2:
+        continue
+    try:
+        v = ver(t)
+    except ValueError:
+        continue
+    age = (now - datetime.datetime.fromisoformat(r["published_at"].replace("Z", "+00:00"))).days
+    if v[:2] == c[:2] and v > ver(target) and age >= min_age:
+        target = t
+    elif v[:2] > c[:2] and (newer_minor == "-" or v > ver(newer_minor)):
+        newer_minor = t
+print(target, newer_minor)
+' "$CUR" "$MIN_AGE_DAYS")
+
+[ "$NEWER_MINOR" != "-" ] && log "NOTICE: $NEWER_MINOR is available (minor/major upgrade) - not automatic, upgrade by hand after reading the release notes"
+
+if [ "$TARGET" = "$CUR" ]; then
+  log "Immich $CUR is up to date for its $(echo "$CUR" | cut -d. -f1-2).x series"
+  exit 0
+fi
+log "Upgrading Immich $CUR -> $TARGET"
+[ "$DRY_RUN" = 1 ] && { log "(dry run, stopping here)"; exit 0; }
+
+# 1. Database backup
+mkdir -p "$BACKUPS"
+PRIMARY=$(kubectl -n "$NS" get clusters.postgresql.cnpg.io immich-database -o jsonpath='{.status.currentPrimary}')
+DUMP="$BACKUPS/immich-db-$(date +%F-%H%M)-$CUR.dump"
+kubectl -n "$NS" exec "$PRIMARY" -c postgres -- pg_dump -U postgres -d immich -Fc > "$DUMP"
+[ -s "$DUMP" ] || { log "ERROR: database backup is empty, aborting"; rm -f "$DUMP"; exit 1; }
+chown kube:kube "$DUMP"
+log "Database backup: $DUMP ($(du -h "$DUMP" | cut -f1))"
+ls -1t "$BACKUPS"/immich-db-*.dump | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -f
+
+# 2. Upgrade
+cp "$VALUES" "$VALUES.prev"
+sed -i -E "s/^( {10}tag: )$CUR\$/\1$TARGET/" "$VALUES"
+rollback() {
+  log "ERROR: upgrade to $TARGET failed - rolling back to $CUR"
+  cp "$VALUES.prev" "$VALUES"
+  helm rollback immich -n "$NS" --wait --timeout 10m || true
+  exit 1
+}
+helm upgrade immich "$CHART" --version "$CHART_VERSION" -n "$NS" -f "$VALUES" --wait --timeout 15m || rollback
+
+# 3. Verify the server reports the new version
+for _ in $(seq 1 30); do
+  GOT=$(curl -fsS --max-time 5 -H "Host: $HOST" "http://$TRAEFIK/api/server/version" 2>/dev/null |
+        python3 -c 'import json,sys; d=json.load(sys.stdin); print("v%d.%d.%d" % (d["major"], d["minor"], d["patch"]))' 2>/dev/null || true)
+  [ "$GOT" = "$TARGET" ] && { chown kube:kube "$VALUES" "$VALUES.prev"; log "Immich upgraded to $TARGET"; exit 0; }
+  sleep 10
+done
+rollback

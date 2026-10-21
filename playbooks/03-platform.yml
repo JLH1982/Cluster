@@ -1,0 +1,112 @@
+# Cluster platform: load balancer, ingress, storage, monitoring, databases.
+# Everything runs on the master with kubectl/helm. Releases that already match are skipped.
+- name: Cluster platform
+  hosts: k3s_init
+  become: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    - name: Create the config staging folders
+      ansible.builtin.file:
+        path: "{{ config_dir }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [platform, helm-values, apps, apps/immich]
+      check_mode: false
+
+    # ---- Helm ----
+    - name: Check helm
+      ansible.builtin.shell: helm version --short 2>/dev/null | cut -d+ -f1
+      register: helm_installed
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Install helm {{ helm_version }}
+      when: helm_installed.stdout != helm_version
+      block:
+        - name: Download helm
+          ansible.builtin.get_url:
+            url: "https://get.helm.sh/helm-{{ helm_version }}-linux-arm64.tar.gz"
+            checksum: "sha256:https://get.helm.sh/helm-{{ helm_version }}-linux-arm64.tar.gz.sha256sum"
+            dest: /root/helm.tar.gz
+            mode: "0600"
+        - name: Unpack helm
+          ansible.builtin.unarchive:
+            src: /root/helm.tar.gz
+            dest: /usr/local/bin
+            remote_src: true
+            extra_opts: [--strip-components=1, linux-arm64/helm]
+
+    - name: Helm chart repositories
+      ansible.builtin.command: helm repo add {{ item.key }} {{ item.value }} --force-update
+      loop: "{{ helm_repos | dict2items }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Refresh chart lists
+      ansible.builtin.command: helm repo update
+      changed_when: false
+      check_mode: false
+
+    # ---- Load balancer and ingress ----
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars: {release: metallb, ns: metallb-system, chart: metallb/metallb, version: 0.16.1}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: platform/metallb-pool.yaml}
+
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars: {release: traefik, ns: traefik, chart: traefik/traefik, version: 41.7.1, values: helm-values/traefik.yaml}
+
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars: {release: cert-manager, ns: cert-manager, chart: jetstack/cert-manager, version: v1.21.2, values: helm-values/cert-manager.yaml}
+
+    # ---- Storage ----
+    - name: Mark which nodes get a Longhorn disk
+      ansible.builtin.shell: |
+        set -e
+        before=$(kubectl get node {{ item }} -o jsonpath='{.metadata.labels.node\.longhorn\.io/create-default-disk}{" "}{.metadata.annotations.node\.longhorn\.io/default-disks-config}')
+        {% set d = hostvars[item].longhorn_disk %}
+        {% if d.path == '/var/lib/longhorn' %}
+        kubectl label node {{ item }} node.longhorn.io/create-default-disk=true --overwrite >/dev/null
+        {% else %}
+        kubectl label node {{ item }} node.longhorn.io/create-default-disk=config --overwrite >/dev/null
+        kubectl annotate node {{ item }} --overwrite >/dev/null \
+          'node.longhorn.io/default-disks-config=[{"path":"{{ d.path }}","allowScheduling":true,"name":"{{ d.longhorn_name | default('disk1') }}"}]'
+        {% endif %}
+        after=$(kubectl get node {{ item }} -o jsonpath='{.metadata.labels.node\.longhorn\.io/create-default-disk}{" "}{.metadata.annotations.node\.longhorn\.io/default-disks-config}')
+        [ "$before" = "$after" ] || echo changed
+      register: lh_label
+      changed_when: "'changed' in lh_label.stdout"
+      loop: "{{ groups['k3s_cluster'] }}"
+      when: hostvars[item].longhorn_disk is defined
+
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars: {release: longhorn, ns: longhorn-system, chart: longhorn/longhorn, version: 1.13.0, values: helm-values/longhorn.yaml, wait_timeout: 15m}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: longhorn-basic-auth
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: kubernetes.io/basic-auth
+          metadata: {name: longhorn-basic-auth, namespace: longhorn-system}
+          stringData: "{{ vault_longhorn_basic_auth }}"
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: platform/longhorn-ingress.yaml}
+
+    # ---- Monitoring ----
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars: {release: prometheus, ns: monitoring, chart: prometheus-community/kube-prometheus-stack, version: 92.9.0, values: helm-values/prometheus.yaml, wait_timeout: 15m}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      loop: [platform/k3s-alerts.yaml, platform/local-path-alerts.yaml, platform/traefik-servicemonitor.yaml, platform/grafana-dashboard-raspberry-pi.yaml, platform/grafana-dashboards-unifi.yaml]
+      loop_control: {loop_var: src}
+
+    # ---- Databases ----
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars: {release: cnpg, ns: cnpg-system, chart: cnpg/cloudnative-pg, version: 0.29.1}

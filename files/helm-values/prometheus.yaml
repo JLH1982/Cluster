@@ -1,0 +1,77 @@
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      limits:
+        cpu: 100m
+        memory: 128Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+  enabled: true
+grafana:
+  ingress:
+    enabled: true
+    hosts:
+    - grafana.10.0.20.230.sslip.io
+    ingressClassName: traefik
+  # Keep dashboards, settings and imports across restarts (without this, Grafana starts empty)
+  persistence:
+    enabled: true
+    type: pvc
+    storageClassName: longhorn
+    accessModes:
+    - ReadWriteOnce
+    size: 2Gi
+  # A ReadWriteOnce volume can't be shared by an old and a new pod during an update
+  deploymentStrategy:
+    type: Recreate
+  grafana.ini:
+    dashboards:
+      # From files/platform/grafana-dashboard-raspberry-pi.yaml (the sidecar writes it to /tmp/dashboards)
+      default_home_dashboard_path: /tmp/dashboards/raspberry-pi-cluster.json
+# k3s runs these inside the k3s binary; there is nothing separate to scrape
+kubeControllerManager:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeStateMetrics:
+  enabled: true
+  resources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+nodeExporter:
+  enabled: true
+  resources:
+    limits:
+      cpu: 100m
+      memory: 64Mi
+    requests:
+      cpu: 50m
+      memory: 32Mi
+prometheus:
+  prometheusSpec:
+    additionalScrapeConfigs: []
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+      requests:
+        cpu: 100m
+        memory: 512Mi
+    retention: 7d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+          - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi

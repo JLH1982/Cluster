@@ -1,0 +1,11 @@
+# USB disk for Longhorn. A replacement disk: sudo mkfs.ext4 -L longhorn /dev/sdX, then
+# change src to LABEL=longhorn.
+longhorn_disk:
+  src: UUID=f311ce7b-7b8d-453a-b5c8-9fba654f1ed4
+  path: /mnt/storage
+  opts: defaults,noatime,nodiratime,nofail
+  longhorn_name: ssd
+
+pi_config:
+  arm_freq: "3000"
+  over_voltage_delta: "50000"

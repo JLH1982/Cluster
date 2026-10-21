@@ -1,0 +1,11 @@
+# USB disk for Longhorn (format a new disk with: sudo mkfs.ext4 -L longhorn /dev/sdX1)
+longhorn_disk:
+  src: LABEL=longhorn
+  path: /var/lib/longhorn
+  opts: defaults,noatime,nofail
+
+# Raspberry Pi firmware settings (/boot/firmware/config.txt); applied on next reboot
+pi_config:
+  arm_boost: "1"
+  arm_freq: "3000"
+  over_voltage_delta: "50000"

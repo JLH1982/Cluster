@@ -1,0 +1,6 @@
+# Never commit secrets or data
+backups/
+inventory/group_vars/all/vault.yml
+*.retry
+*credentials*
+.vault-pass*

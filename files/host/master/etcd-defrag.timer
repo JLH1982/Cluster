@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly k3s etcd defrag
+
+[Timer]
+OnCalendar=Sun 03:30
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

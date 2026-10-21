@@ -1,0 +1,86 @@
+# Back up app data from the cluster to this laptop (backups/<timestamp>/).
+#   ansible-playbook playbooks/backup.yml
+# Contents: Immich database, Home Assistant config, Z-Wave store, Uptime Kuma data,
+# both websites' files, and an etcd snapshot (all Kubernetes objects, secrets included).
+# NOT included: Immich photo files (too large for the laptop) - those need an off-site backup.
+- name: Back up cluster data
+  hosts: k3s_init
+  become: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  vars:
+    dest: "{{ backup_dir_remote }}/{{ stamp }}"
+    pvc_backups:
+      - {file: home-assistant.tgz, ns: home-assistant, deploy: home-assistant, container: home-assistant, path: /config}
+      - {file: zwave-js-ui.tgz, ns: home-assistant, deploy: zwave-js-ui, container: zwave-js-ui, path: /usr/src/app/store}
+      - {file: uptime-kuma.tgz, ns: uptime-kuma, deploy: uptime-kuma, container: uptime-kuma, path: /app/data}
+      - {file: darkweb-site.tgz, ns: darkweb, deploy: darkweb-website, container: nginx, path: /usr/share/nginx/html}
+      - {file: website.tgz, ns: default, deploy: website, container: nginx, path: /usr/share/nginx/html}
+  tasks:
+    - name: Pick the backup name
+      ansible.builtin.set_fact:
+        stamp: "{{ lookup('pipe', 'date +%Y-%m-%d-%H%M') }}"
+
+    - name: Create the local backup folder (private - it contains secrets)
+      ansible.builtin.file:
+        path: "{{ backup_dir_local }}/{{ stamp }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Create {{ dest }}
+      ansible.builtin.file:
+        path: "{{ dest }}"
+        state: directory
+        mode: "0700"
+
+    - name: Find the Immich database primary
+      ansible.builtin.command: >-
+        kubectl -n immich get clusters.postgresql.cnpg.io immich-database -o jsonpath={.status.currentPrimary}
+      register: pg_primary
+      changed_when: false
+
+    - name: Dump the Immich database
+      ansible.builtin.shell: >-
+        kubectl -n immich exec {{ pg_primary.stdout }} -c postgres -- pg_dump -U postgres -d immich -Fc
+        > {{ dest }}/immich-db.dump && test -s {{ dest }}/immich-db.dump
+
+    - name: Archive app volumes
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        kubectl -n {{ item.ns }} exec deploy/{{ item.deploy }} -c {{ item.container }} --
+        tar czf - --exclude=./lost+found -C {{ item.path }} . > {{ dest }}/{{ item.file }} && test -s {{ dest }}/{{ item.file }}
+      args:
+        executable: /bin/bash
+      loop: "{{ pvc_backups }}"
+      loop_control: {label: "{{ item.file }}"}
+
+    - name: Snapshot etcd
+      ansible.builtin.shell: |
+        set -e
+        k3s etcd-snapshot save --name ansible-backup >/dev/null 2>&1
+        f=$(ls -t /var/lib/rancher/k3s/server/db/snapshots/ansible-backup-* | head -1)
+        mv "$f" {{ dest }}/etcd-snapshot.db
+
+    - name: List backup files
+      ansible.builtin.find:
+        paths: "{{ dest }}"
+      register: backup_files
+
+    - name: Copy the backup to this laptop
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "{{ backup_dir_local }}/{{ stamp }}/"
+        flat: true
+      loop: "{{ backup_files.files }}"
+      loop_control: {label: "{{ item.path | basename }}"}
+
+    - name: Keep only the newest {{ backup_keep_remote }} backups on the master
+      ansible.builtin.shell: >-
+        ls -1d {{ backup_dir_remote }}/20*/ | sort | head -n -{{ backup_keep_remote }} | xargs -r rm -rf
+      changed_when: false
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "Backup saved to {{ (backup_dir_local ~ '/' ~ stamp) | realpath }}"

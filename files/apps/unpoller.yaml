@@ -1,0 +1,95 @@
+# UniFi Poller - reads statistics from the UniFi Cloud Gateway (10.0.20.1) with a local,
+# view-only UniFi account and exposes them to Prometheus. Dashboards: files/platform/grafana-dashboards-unifi.yaml
+# The account is in the unpoller-unifi secret (from the vault).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: unpoller
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unpoller
+  namespace: unpoller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unpoller
+  template:
+    metadata:
+      labels:
+        app: unpoller
+    spec:
+      containers:
+        - name: unpoller
+          image: ghcr.io/unpoller/unpoller:v5.5.1
+          env:
+            - name: UP_UNIFI_DEFAULT_URL
+              value: https://10.0.20.1
+            - name: UP_UNIFI_DEFAULT_USER
+              valueFrom:
+                secretKeyRef: {name: unpoller-unifi, key: username}
+            - name: UP_UNIFI_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef: {name: unpoller-unifi, key: password}
+            # The gateway uses a self-signed certificate
+            - name: UP_UNIFI_DEFAULT_VERIFY_SSL
+              value: "false"
+            - name: UP_UNIFI_DEFAULT_SAVE_SITES
+              value: "true"
+            - name: UP_INFLUXDB_DISABLE
+              value: "true"
+            - name: UP_PROMETHEUS_HTTP_LISTEN
+              value: 0.0.0.0:9130
+            - name: UP_PROMETHEUS_NAMESPACE
+              value: unpoller
+          ports:
+            - name: metrics
+              containerPort: 9130
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            periodSeconds: 15
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: unpoller
+  namespace: unpoller
+  labels:
+    app: unpoller
+spec:
+  selector:
+    app: unpoller
+  ports:
+    - name: metrics
+      port: 9130
+      targetPort: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: unpoller
+  namespace: unpoller
+  labels:
+    release: prometheus   # required by the Prometheus serviceMonitorSelector
+spec:
+  selector:
+    matchLabels:
+      app: unpoller
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

@@ -1,0 +1,47 @@
+# Apply one manifest on the master, only when it differs from what is running.
+# Vars: src (path under files/)  OR  secret_name + content (inline YAML, e.g. secrets; never logged or kept)
+#       replace - optional {regexp, with} applied to the staged src file (e.g. to pin an image tag)
+- name: Staging path
+  ansible.builtin.set_fact:
+    _path: "{{ config_dir ~ '/' ~ (src if src is defined else '.secret-' ~ secret_name ~ '.yaml') }}"
+
+- name: "Stage {{ src if src is defined else secret_name }}"
+  ansible.builtin.copy:
+    src: "{{ ('../files/' ~ src) if src is defined else omit }}"
+    content: "{{ content | default(omit) }}"
+    dest: "{{ _path }}"
+    mode: "{{ '0600' if content is defined else '0644' }}"
+  no_log: "{{ content is defined }}"
+  check_mode: false
+
+- name: "Adjust {{ src }}"
+  ansible.builtin.replace:
+    path: "{{ _path }}"
+    regexp: "{{ replace.regexp }}"
+    replace: "{{ replace.with }}"
+  when: replace is defined
+  check_mode: false
+
+- name: "Compare {{ src if src is defined else secret_name }} with the cluster"
+  ansible.builtin.command: kubectl diff -f {{ _path }}
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: kdiff
+  changed_when: kdiff.rc == 1
+  failed_when: false
+  no_log: "{{ content is defined }}"
+  check_mode: false
+
+- name: "Apply {{ src if src is defined else secret_name }}"
+  ansible.builtin.command: kubectl apply -f {{ _path }}
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  when: kdiff.rc != 0
+  no_log: "{{ content is defined }}"
+
+- name: "Remove staged secret"
+  ansible.builtin.file:
+    path: "{{ _path }}"
+    state: absent
+  when: content is defined
+  check_mode: false

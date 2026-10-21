@@ -1,0 +1,6 @@
+# Full build, in order. Safe to re-run on the running cluster: it only changes what differs.
+- ansible.builtin.import_playbook: 01-hosts.yml
+- ansible.builtin.import_playbook: 02-k3s.yml
+- ansible.builtin.import_playbook: 03-platform.yml
+- ansible.builtin.import_playbook: 04-apps.yml
+- ansible.builtin.import_playbook: 05-maintenance.yml

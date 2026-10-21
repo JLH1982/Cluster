@@ -1,0 +1,38 @@
+# Refill one app volume from a .tgz. Expects r = {name, file, ns, deploy, pvc}, src_dir, stage.
+- name: "Upload {{ r.file }}"
+  ansible.builtin.copy:
+    src: "{{ src_dir }}/{{ r.file }}"
+    dest: "{{ stage }}/{{ r.file }}"
+    mode: "0600"
+
+- name: "Stop {{ r.deploy }}"
+  ansible.builtin.shell: |
+    kubectl -n {{ r.ns }} scale deploy {{ r.deploy }} --replicas=0
+    kubectl -n {{ r.ns }} wait pod -l app={{ r.deploy }} --for=delete --timeout=180s
+
+- name: "Start a helper pod on {{ r.pvc }}"
+  ansible.builtin.shell: |
+    kubectl -n {{ r.ns }} delete pod restore-helper --ignore-not-found --wait
+    kubectl -n {{ r.ns }} apply -f - <<'EOF'
+    apiVersion: v1
+    kind: Pod
+    metadata: {name: restore-helper, namespace: {{ r.ns }}}
+    spec:
+      containers:
+        - {name: helper, image: "busybox:1.37", command: [sleep, "3600"], volumeMounts: [{name: data, mountPath: /data}]}
+      volumes:
+        - {name: data, persistentVolumeClaim: {claimName: {{ r.pvc }}}}
+    EOF
+    kubectl -n {{ r.ns }} wait pod/restore-helper --for=condition=Ready --timeout=300s
+
+- name: "Replace the contents of {{ r.pvc }}"
+  ansible.builtin.shell: >-
+    kubectl -n {{ r.ns }} exec -i restore-helper -- sh -c
+    'find /data -mindepth 1 -maxdepth 1 ! -name lost+found -exec rm -rf {} + && tar xzf - -C /data'
+    < {{ stage }}/{{ r.file }}
+
+- name: "Remove the helper pod and start {{ r.deploy }}"
+  ansible.builtin.shell: |
+    kubectl -n {{ r.ns }} delete pod restore-helper --wait
+    kubectl -n {{ r.ns }} scale deploy {{ r.deploy }} --replicas=1
+    kubectl -n {{ r.ns }} rollout status deploy/{{ r.deploy }} --timeout=300s

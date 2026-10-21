@@ -1,0 +1,30 @@
+# Install k3s: the first server (cluster-init), then the other servers one at a time, then agents.
+# Nodes that already run k3s are left alone unless k3s_allow_upgrade=true.
+- name: First k3s server
+  hosts: k3s_init
+  become: true
+  tasks:
+    - ansible.builtin.include_tasks: tasks/k3s-node.yml
+      vars:
+        k3s_role: server
+        k3s_first: true
+
+- name: Other k3s servers
+  hosts: "k3s_servers:!k3s_init"
+  become: true
+  serial: 1
+  tasks:
+    - ansible.builtin.include_tasks: tasks/k3s-node.yml
+      vars:
+        k3s_role: server
+        k3s_first: false
+
+- name: k3s agents
+  hosts: k3s_agents
+  become: true
+  serial: 1
+  tasks:
+    - ansible.builtin.include_tasks: tasks/k3s-node.yml
+      vars:
+        k3s_role: agent
+        k3s_first: false

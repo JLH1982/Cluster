@@ -1,0 +1,93 @@
+#!/bin/bash
+# cloudflared auto-update, run daily by cloudflared-auto-update.timer.
+#
+# Policy:
+#   - Upgrades to the newest cloudflared release once it is MIN_AGE_DAYS old
+#     (bad releases get pulled quickly).
+#   - Only uses releases that have an arm64 image on Docker Hub.
+#   - Rolling update of the 2 tunnel replicas, so the sites stay up.
+#   - Verifies the tunnel reconnects and the public sites answer; rolls back on failure.
+#
+# Logs: journalctl -u cloudflared-auto-update
+# Dry run: cloudflared-auto-update --dry-run
+# Urgent (security) release: sudo MIN_AGE_DAYS=0 cloudflared-auto-update
+set -euo pipefail
+
+NS=cloudflare
+DEPLOY=cloudflared
+IMAGE=cloudflare/cloudflared
+MIN_AGE_DAYS=${MIN_AGE_DAYS:-2}
+CHECK_URL=https://portfolio.hinkel-net.com/
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+DRY_RUN=0; [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
+log() { echo "$*"; }
+
+CUR=$(kubectl -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.spec.template.spec.containers[0].image}' | sed -n 's/.*:\([0-9.]*\)$/\1/p')
+[ -n "$CUR" ] || { log "ERROR: could not read the running cloudflared version"; exit 1; }
+
+# Pick the newest release that is old enough.
+TARGET=$(curl -fsS --max-time 30 "https://api.github.com/repos/cloudflare/cloudflared/releases?per_page=20" |
+  python3 -c '
+import json, sys, datetime
+cur, min_age = sys.argv[1], int(sys.argv[2])
+def ver(t): return tuple(int(x) for x in t.split("."))
+now = datetime.datetime.now(datetime.timezone.utc)
+target = cur
+for r in json.load(sys.stdin):
+    t = r["tag_name"]
+    if r["draft"] or r["prerelease"]:
+        continue
+    try:
+        v = ver(t)
+    except ValueError:
+        continue
+    age = (now - datetime.datetime.fromisoformat(r["published_at"].replace("Z", "+00:00"))).days
+    if v > ver(target) and age >= min_age:
+        target = t
+print(target)
+' "$CUR" "$MIN_AGE_DAYS")
+
+if [ "$TARGET" = "$CUR" ]; then
+  log "cloudflared $CUR is up to date (releases newer than ${MIN_AGE_DAYS} days are skipped until they age)"
+  exit 0
+fi
+
+ARCHES=$(curl -fsS --max-time 30 "https://hub.docker.com/v2/repositories/$IMAGE/tags/$TARGET" |
+  python3 -c 'import json,sys; print(" ".join(i["architecture"] for i in json.load(sys.stdin).get("images", [])))' || true)
+case " $ARCHES " in
+  *" arm64 "*) ;;
+  *) log "cloudflared $TARGET has no arm64 image on Docker Hub yet - skipping"; exit 0 ;;
+esac
+
+log "Upgrading cloudflared $CUR -> $TARGET"
+[ "$DRY_RUN" = 1 ] && { log "(dry run, stopping here)"; exit 0; }
+
+rollback() {
+  log "ERROR: upgrade to $TARGET failed - rolling back to $CUR"
+  kubectl -n "$NS" rollout undo deploy/"$DEPLOY"
+  kubectl -n "$NS" rollout status deploy/"$DEPLOY" --timeout=5m || true
+  exit 1
+}
+
+START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+kubectl -n "$NS" set image deploy/"$DEPLOY" cloudflared="$IMAGE:$TARGET"
+kubectl -n "$NS" annotate deploy/"$DEPLOY" kubernetes.io/change-cause="cloudflared-auto-update $CUR -> $TARGET" --overwrite >/dev/null
+kubectl -n "$NS" rollout status deploy/"$DEPLOY" --timeout=5m || rollback
+
+# Every new pod must register with Cloudflare, and the public site must answer through the tunnel.
+for _ in $(seq 1 18); do
+  OK=1
+  # Old pods may still be shutting down; only check the ones not being deleted.
+  for P in $(kubectl -n "$NS" get pods -l app=cloudflared \
+      -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}'); do
+    kubectl -n "$NS" logs "$P" --since-time="$START" 2>/dev/null | grep -q "Registered tunnel connection" || OK=0
+  done
+  CODE=$(curl -s -o /dev/null --max-time 10 -w '%{http_code}' "$CHECK_URL" || echo 000)
+  if [ "$OK" = 1 ] && [ "$CODE" -ge 200 ] && [ "$CODE" -lt 500 ]; then
+    log "cloudflared upgraded to $TARGET (tunnel registered, $CHECK_URL -> $CODE)"
+    exit 0
+  fi
+  sleep 10
+done
+rollback

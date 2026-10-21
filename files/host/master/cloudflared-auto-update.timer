@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily cloudflared release check
+
+[Timer]
+OnCalendar=*-*-* 05:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

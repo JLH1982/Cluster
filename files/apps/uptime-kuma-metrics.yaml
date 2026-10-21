@@ -1,0 +1,21 @@
+# Prometheus scrapes Uptime Kuma's check results (monitor_status, monitor_response_time), so
+# Grafana can show which sites, Pis and the router are up. Kuma's /metrics needs an API key,
+# kept in the uptime-kuma-metrics secret (from the vault).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: uptime-kuma
+  namespace: uptime-kuma
+  labels:
+    release: prometheus   # required by the Prometheus serviceMonitorSelector
+spec:
+  selector:
+    matchLabels:
+      app: uptime-kuma
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 60s
+    basicAuth:
+      username: {name: uptime-kuma-metrics, key: username}
+      password: {name: uptime-kuma-metrics, key: password}

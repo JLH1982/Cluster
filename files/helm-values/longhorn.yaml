@@ -1,0 +1,6 @@
+defaultSettings:
+  # Only nodes labelled node.longhorn.io/create-default-disk get a disk (master and node1)
+  createDefaultDiskLabeledNodes: true
+  defaultReplicaCount: 2
+persistence:
+  defaultClassReplicaCount: 2

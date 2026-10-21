@@ -1,0 +1,8 @@
+[Unit]
+Description=Immich patch-release auto-update (backup, upgrade, verify, rollback)
+After=k3s.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/immich-auto-update

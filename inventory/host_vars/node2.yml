@@ -1,0 +1,6 @@
+# No Longhorn disk on this node yet. To add one, copy longhorn_disk from master.yml.
+
+pi_config:
+  arm_boost: "1"
+  arm_freq: "2800"
+  over_voltage_delta: "50000"

@@ -1,0 +1,56 @@
+# Scheduled maintenance on the master: weekly etcd defrag, daily Immich and cloudflared updates.
+- name: Maintenance jobs
+  hosts: k3s_init
+  become: true
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+  tasks:
+    - name: Check etcdctl
+      ansible.builtin.shell: /usr/local/bin/etcdctl version 2>/dev/null | awk '/etcdctl version/{print "v"$3}'
+      register: etcdctl_installed
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Install etcdctl {{ etcdctl_version }}
+      when: etcdctl_installed.stdout != etcdctl_version
+      block:
+        - name: Download etcd
+          ansible.builtin.get_url:
+            url: "https://github.com/etcd-io/etcd/releases/download/{{ etcdctl_version }}/etcd-{{ etcdctl_version }}-linux-arm64.tar.gz"
+            checksum: "sha256:https://github.com/etcd-io/etcd/releases/download/{{ etcdctl_version }}/SHA256SUMS"
+            dest: /root/etcd.tar.gz
+            mode: "0600"
+        - name: Unpack etcdctl
+          ansible.builtin.unarchive:
+            src: /root/etcd.tar.gz
+            dest: /usr/local/bin
+            remote_src: true
+            extra_opts: [--strip-components=1, "etcd-{{ etcdctl_version }}-linux-arm64/etcdctl"]
+
+    - name: Helper scripts
+      ansible.builtin.copy:
+        src: "../files/host/master/{{ item }}"
+        dest: /usr/local/bin/
+        mode: "0755"
+      loop: [k3s-etcdctl, immich-auto-update, cloudflared-auto-update]
+
+    - name: Systemd units
+      ansible.builtin.copy:
+        src: "../files/host/master/{{ item }}"
+        dest: /etc/systemd/system/
+        mode: "0644"
+      loop: [etcd-defrag.service, etcd-defrag.timer, immich-auto-update.service, immich-auto-update.timer, cloudflared-auto-update.service, cloudflared-auto-update.timer]
+      notify: Reload systemd
+
+    - name: Run pending handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Enable timers
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: [etcd-defrag.timer, immich-auto-update.timer, cloudflared-auto-update.timer]

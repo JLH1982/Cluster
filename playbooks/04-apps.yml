@@ -1,0 +1,198 @@
+# Apps: Cloudflare tunnel, portfolio website, onion site, Immich, Home Assistant, Uptime Kuma, homepage, UniFi Poller.
+# Secrets come from the vault. App data (photos, configs, site files) is restored separately
+# with playbooks/restore-data.yml.
+- name: Apps
+  hosts: k3s_init
+  become: true
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  tasks:
+    - name: Create the config staging folders
+      ansible.builtin.file:
+        path: "{{ config_dir }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [apps, apps/immich]
+      check_mode: false
+
+    # ---- Cloudflare tunnel ----
+    - name: Find the running cloudflared version
+      ansible.builtin.shell: >-
+        kubectl -n cloudflare get deploy cloudflared -o jsonpath='{.spec.template.spec.containers[0].image}'
+        2>/dev/null | sed -n 's/.*:\([0-9.]*\)$/\1/p'
+      register: cloudflared_live
+      changed_when: false
+      check_mode: false
+
+    - name: Never downgrade cloudflared
+      ansible.builtin.set_fact:
+        cloudflared_tag: >-
+          {{ cloudflared_live.stdout if (cloudflared_live.stdout and cloudflared_live.stdout is version(cloudflared_version, '>'))
+             else cloudflared_version }}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        src: apps/cloudflared.yaml
+        replace: {regexp: 'cloudflare/cloudflared:[0-9.]+', with: "cloudflare/cloudflared:{{ cloudflared_tag }}"}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: cloudflared-token
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: cloudflared-token, namespace: cloudflare}
+          stringData: {token: "{{ vault_cloudflared_token }}"}
+
+    # ---- Websites ----
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/website.yaml}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/darkweb.yaml}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: onion-keys
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: onion-keys, namespace: darkweb}
+          data: "{{ vault_onion_keys_b64 }}"
+
+    # ---- Immich ----
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/immich/00-namespace.yaml}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: immich-postgres-secret
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: kubernetes.io/basic-auth
+          metadata: {name: immich-postgres-secret, namespace: immich}
+          stringData:
+            username: "{{ vault_immich_db_username }}"
+            password: "{{ vault_immich_db_password }}"
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      loop: [apps/immich/01-database.yaml, apps/immich/02-volumes.yaml]
+      loop_control: {loop_var: src}
+
+    - name: Wait for the Immich database
+      ansible.builtin.command: >-
+        kubectl -n immich wait clusters.postgresql.cnpg.io/immich-database
+        --for=condition=Ready --timeout=600s
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Find the running Immich version
+      ansible.builtin.shell: >-
+        kubectl -n immich get deploy immich-server -o jsonpath='{.spec.template.spec.containers[0].image}'
+        2>/dev/null | sed -n 's/.*:\(v[0-9.]*\)$/\1/p'
+      register: immich_live
+      changed_when: false
+      check_mode: false
+
+    - name: Never downgrade Immich
+      ansible.builtin.set_fact:
+        immich_tag: >-
+          {{ immich_live.stdout if (immich_live.stdout and immich_live.stdout[1:] is version(immich_version[1:], '>'))
+             else immich_version }}
+
+    - name: Immich values (also used by the immich-auto-update timer)
+      ansible.builtin.template:
+        src: ../files/apps/immich/values.yaml.j2
+        dest: /home/kube/immich/values.yaml
+        owner: kube
+        group: kube
+        mode: "0644"
+
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars:
+        release: immich
+        ns: immich
+        chart: oci://ghcr.io/immich-app/immich-charts/immich
+        version: "{{ immich_chart_version }}"
+        remote_values: /home/kube/immich/values.yaml
+        values_dict: "{{ lookup('template', '../files/apps/immich/values.yaml.j2') | from_yaml }}"
+        wait_timeout: 15m
+
+    # ---- Home Assistant + Z-Wave ----
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/home-assistant.yaml}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: zwave-basic-auth
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: kubernetes.io/basic-auth
+          metadata: {name: zwave-basic-auth, namespace: home-assistant}
+          stringData: "{{ vault_zwave_basic_auth }}"
+
+    - name: Wait for Z-Wave JS UI
+      ansible.builtin.command: kubectl -n home-assistant rollout status deploy/zwave-js-ui --timeout=300s
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Check for Z-Wave settings (stick path and network security keys)
+      ansible.builtin.command: kubectl -n home-assistant exec deploy/zwave-js-ui -- test -s /usr/src/app/store/settings.json
+      register: zwave_settings
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Restore Z-Wave settings from the vault (fresh install only)
+      ansible.builtin.shell: |
+        kubectl -n home-assistant exec -i deploy/zwave-js-ui -- sh -c 'cat > /usr/src/app/store/settings.json'
+        kubectl -n home-assistant rollout restart deploy/zwave-js-ui
+      args:
+        stdin: "{{ vault_zwave_settings_json }}"
+      no_log: true
+      when: zwave_settings.rc != 0
+
+    # ---- Uptime Kuma ----
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/uptime-kuma.yaml}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: uptime-kuma-metrics
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: uptime-kuma-metrics, namespace: uptime-kuma}
+          stringData: "{{ vault_uptime_kuma_metrics }}"
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/uptime-kuma-metrics.yaml}
+
+    # ---- UniFi Poller (router statistics for Grafana) ----
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/unpoller.yaml}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: unpoller-unifi
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: unpoller-unifi, namespace: unpoller}
+          stringData: "{{ vault_unpoller_unifi }}"
+
+    # ---- Homepage (www.hinkel-net.com) ----
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/homepage.yaml}

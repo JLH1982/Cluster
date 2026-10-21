@@ -1,0 +1,38 @@
+# Postgres for Immich via CloudNativePG (VectorChord 1.1.1 / PG 18.4; Immich v3 needs vchord >=0.3 <2)
+# The password secret (immich-postgres-secret) is created separately and not stored in this file.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: immich-database
+  namespace: immich
+spec:
+  instances: 3
+  imageName: ghcr.io/tensorchord/cloudnative-vectorchord:18.4
+
+  storage:
+    size: 20Gi
+    storageClass: local-path
+
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+
+  bootstrap:
+    initdb:
+      database: immich
+      owner: immich
+      secret:
+        name: immich-postgres-secret
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS vchord CASCADE;
+        - CREATE EXTENSION IF NOT EXISTS earthdistance CASCADE;
+
+  postgresql:
+    shared_preload_libraries:
+      - "vchord.so"
+
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+
+  primaryUpdateStrategy: unsupervised

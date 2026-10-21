@@ -1,0 +1,261 @@
+# Home Assistant + Z-Wave JS UI
+#   Home Assistant: https://ha.hinkel-net.com (Cloudflare tunnel) or http://ha.10.0.20.230.sslip.io (LAN)
+#   Z-Wave JS UI:   http://zwave.10.0.20.230.sslip.io (same login as the Longhorn dashboard)
+# Z-Wave JS UI runs on node3, where the Nabu Casa ZWA-2 stick is plugged in.
+# Home Assistant connects to it at ws://zwave-js-ui.home-assistant:3000
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: home-assistant
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: home-assistant-config
+  namespace: home-assistant
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zwave-js-ui-store
+  namespace: home-assistant
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: home-assistant-bootstrap
+  namespace: home-assistant
+data:
+  # Only written on first start; edit /config/configuration.yaml afterwards.
+  # Reverse-proxy trust (10.42.0.0/16) lives in /config/.storage/http, not YAML:
+  # HA 2026.10 reverts unconfirmed YAML http settings after 5 minutes.
+  configuration.yaml: |
+    default_config:
+
+    automation: !include automations.yaml
+    script: !include scripts.yaml
+    scene: !include scenes.yaml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zwave-js-ui
+  namespace: home-assistant
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: zwave-js-ui
+  template:
+    metadata:
+      labels:
+        app: zwave-js-ui
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: node3
+      containers:
+        - name: zwave-js-ui
+          image: zwavejs/zwave-js-ui:11.24.3
+          securityContext:
+            privileged: true
+          env:
+            - name: TZ
+              value: America/Chicago
+          ports:
+            - name: http
+              containerPort: 8091
+            - name: ws
+              containerPort: 3000
+          volumeMounts:
+            - name: store
+              mountPath: /usr/src/app/store
+            - name: zwa2
+              mountPath: /dev/zwave
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: store
+          persistentVolumeClaim:
+            claimName: zwave-js-ui-store
+        - name: zwa2
+          hostPath:
+            path: /dev/serial/by-id/usb-Nabu_Casa_ZWA-2_1CDBD45C20D8-if00
+            type: CharDevice
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zwave-js-ui
+  namespace: home-assistant
+spec:
+  selector:
+    app: zwave-js-ui
+  ports:
+    - name: http
+      port: 8091
+      targetPort: http
+    - name: ws
+      port: 3000
+      targetPort: ws
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-assistant
+  namespace: home-assistant
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: home-assistant
+  template:
+    metadata:
+      labels:
+        app: home-assistant
+    spec:
+      initContainers:
+        - name: bootstrap-config
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              [ -f /config/configuration.yaml ] || cp /bootstrap/configuration.yaml /config/
+              [ -f /config/automations.yaml ] || echo '[]' > /config/automations.yaml
+              touch /config/scripts.yaml /config/scenes.yaml
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: bootstrap
+              mountPath: /bootstrap
+      containers:
+        - name: home-assistant
+          image: ghcr.io/home-assistant/home-assistant:2026.10.2
+          env:
+            - name: TZ
+              value: America/Chicago
+          ports:
+            - name: http
+              containerPort: 8123
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: home-assistant-config
+        - name: bootstrap
+          configMap:
+            name: home-assistant-bootstrap
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-assistant
+  namespace: home-assistant
+spec:
+  selector:
+    app: home-assistant
+  ports:
+    - name: http
+      port: 8123
+      targetPort: http
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: zwave-auth
+  namespace: home-assistant
+spec:
+  basicAuth:
+    secret: zwave-basic-auth
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: home-assistant
+  namespace: home-assistant
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: ha.10.0.20.230.sslip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: home-assistant
+                port:
+                  name: http
+    - host: ha.hinkel-net.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: home-assistant
+                port:
+                  name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: zwave-js-ui
+  namespace: home-assistant
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: home-assistant-zwave-auth@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: zwave.10.0.20.230.sslip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: zwave-js-ui
+                port:
+                  name: http

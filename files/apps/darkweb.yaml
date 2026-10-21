@@ -1,0 +1,158 @@
+# Tor onion site. The onion address comes from the onion-keys secret (Ansible vault);
+# the site files live on the darkweb-site volume (restored by playbooks/restore-data.yml).
+# Image ghcr.io/jlh1982/tor-onion is built from files/images/tor-onion/Dockerfile.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: darkweb
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: darkweb-site
+  namespace: darkweb
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 55Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: darkweb-website
+  namespace: darkweb
+spec:
+  replicas: 1
+  # RWO volume: stop the old pod before starting the new one
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  selector:
+    matchLabels:
+      app: darkweb-website
+  template:
+    metadata:
+      labels:
+        app: darkweb-website
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: site
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: site
+          persistentVolumeClaim:
+            claimName: darkweb-site
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: darkweb-website
+  namespace: darkweb
+spec:
+  # Fixed: torrc's HiddenServicePort must be an IP address, not a hostname
+  clusterIP: 10.43.35.70
+  selector:
+    app: darkweb-website
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tor-config
+  namespace: darkweb
+data:
+  torrc: |
+    SocksPort 0
+    DataDirectory /var/lib/tor
+    Log notice stdout
+    HiddenServiceDir /var/lib/tor/hidden_service
+    HiddenServiceVersion 3
+    HiddenServicePort 80 10.43.35.70:80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tor
+  namespace: darkweb
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tor
+  template:
+    metadata:
+      labels:
+        app: tor
+    spec:
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+      initContainers:
+        - name: prep-keys
+          image: docker.io/library/busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /hs
+              if [ -f /keys/hs_ed25519_secret_key ]; then
+                cp /keys/hostname /keys/hs_ed25519_secret_key /keys/hs_ed25519_public_key /hs/
+              fi
+              chown -R 10001:10001 /hs
+              chmod 700 /hs
+              find /hs -type f -exec chmod 600 {} +
+          volumeMounts:
+            - name: keys
+              mountPath: /keys
+              readOnly: true
+            - name: hs
+              mountPath: /hs
+      containers:
+        - name: tor
+          image: ghcr.io/jlh1982/tor-onion:1.0.0
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            runAsGroup: 10001
+            runAsNonRoot: true
+            runAsUser: 10001
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tor/torrc
+              subPath: torrc
+            - name: hs
+              mountPath: /var/lib/tor/hidden_service
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: tor-config
+        - name: keys
+          secret:
+            secretName: onion-keys
+            optional: true
+        - name: hs
+          emptyDir: {}

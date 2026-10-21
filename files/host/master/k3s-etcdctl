@@ -1,0 +1,4 @@
+#!/bin/sh
+# etcdctl wired to k3s embedded etcd certs
+T=/var/lib/rancher/k3s/server/tls/etcd
+exec /usr/local/bin/etcdctl --cacert $T/server-ca.crt --cert $T/server-client.crt --key $T/server-client.key --endpoints https://10.0.20.240:2379,https://10.0.20.242:2379,https://10.0.20.243:2379 "$@"

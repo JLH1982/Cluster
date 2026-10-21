@@ -1,0 +1,204 @@
+# Base OS setup for every Pi: packages, kernel settings, firewall, fail2ban, Longhorn disk.
+# Safe to re-run; changes that need a reboot are reported at the end.
+- name: Prepare cluster hosts
+  hosts: k3s_cluster
+  become: true
+  vars:
+    cluster_ips: "{{ groups['k3s_cluster'] | map('extract', hostvars, 'ansible_host') | list }}"
+    pi_config_common:
+      - dtparam=pciex1
+      - dtparam=pciex1_gen=3
+      - max_usb_current_enable=1
+      - kernel=kernel8.img
+  handlers:
+    - name: Reload sysctl
+      ansible.builtin.command: sysctl --system
+    - name: Reboot needed
+      ansible.builtin.set_fact:
+        reboot_needed: true
+  tasks:
+    - name: Set timezone
+      community.general.timezone:
+        name: "{{ timezone }}"
+
+    - name: Install packages
+      ansible.builtin.apt:
+        name: [open-iscsi, nfs-common, cryptsetup, fail2ban, ufw, curl, unattended-upgrades]
+        state: present
+        update_cache: true
+        cache_valid_time: 86400
+
+    - name: Enable iSCSI (Longhorn) and fail2ban
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: [iscsid, fail2ban]
+
+    # ---- Kernel ----
+    - name: Kernel modules loaded at boot
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: /etc/modules-load.d/
+        mode: "0644"
+      with_fileglob: ../files/host/modules-load/*.conf
+      notify: Reboot needed
+
+    - name: Load kernel modules now
+      community.general.modprobe:
+        name: "{{ item }}"
+      loop: [iscsi_tcp, br_netfilter, overlay, nf_conntrack, dm_crypt]
+
+    - name: Sysctl settings (k3s networking, IPv6 off)
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: /etc/sysctl.d/
+        mode: "0644"
+      with_fileglob: ../files/host/sysctl/*.conf
+      notify: Reload sysctl
+
+    - name: Enable memory cgroups (required by k3s)
+      ansible.builtin.replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: '^((?!.*cgroup_enable=memory).*?)\s*$'
+        replace: '\1 cgroup_memory=1 cgroup_enable=memory'
+      notify: Reboot needed
+
+    - name: Pi firmware settings shared by all nodes
+      ansible.builtin.lineinfile:
+        path: /boot/firmware/config.txt
+        line: "{{ item }}"
+      loop: "{{ pi_config_common }}"
+      notify: Reboot needed
+
+    - name: Disable Bluetooth (also fixes the old 'diable-bi' typo)
+      ansible.builtin.lineinfile:
+        path: /boot/firmware/config.txt
+        regexp: '^dtoverlay=(diable-bi|disable-bt)$'
+        line: dtoverlay=disable-bt
+      notify: Reboot needed
+
+    - name: Pi firmware settings for this node
+      ansible.builtin.lineinfile:
+        path: /boot/firmware/config.txt
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}={{ item.value }}"
+      loop: "{{ pi_config | default({}) | dict2items }}"
+      notify: Reboot needed
+
+    # ---- Network ----
+    - name: Find NetworkManager connections
+      ansible.builtin.command: nmcli -g NAME,TYPE connection show
+      register: nm_cons
+      changed_when: false
+      check_mode: false
+
+    - name: Disable IPv6 on wired and Wi-Fi connections
+      ansible.builtin.shell: |
+        set -e
+        if [ "$(nmcli -g ipv6.method connection show "$CON")" != disabled ]; then
+          nmcli connection modify "$CON" ipv6.method disabled
+          echo changed
+        fi
+      environment:
+        CON: "{{ item.split(':')[0] }}"
+      register: nm_ipv6
+      changed_when: "'changed' in nm_ipv6.stdout"
+      loop: "{{ nm_cons.stdout_lines | select('search', ':802-(3-ethernet|11-wireless)$') | reject('search', '^veth') | list }}"
+
+    # ---- Firewall ----
+    - name: Firewall defaults
+      community.general.ufw:
+        direction: "{{ item.dir }}"
+        default: "{{ item.policy }}"
+      loop:
+        - {dir: incoming, policy: deny}
+        - {dir: outgoing, policy: allow}
+        - {dir: routed, policy: deny}
+
+    - name: Allow SSH from anywhere
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: Allow Kubernetes API from the LAN
+      community.general.ufw:
+        rule: allow
+        port: "6443"
+        proto: tcp
+        from_ip: "{{ lan_cidr }}"
+
+    - name: Allow pod and service networks
+      community.general.ufw:
+        rule: allow
+        from_ip: "{{ item }}"
+      loop: ["{{ pod_cidr }}", "{{ service_cidr }}"]
+
+    - name: Allow cluster traffic between nodes
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.0.port }}"
+        proto: "{{ item.0.proto }}"
+        from_ip: "{{ item.1 }}"
+        comment: "{{ item.0.comment | default(omit) }}"
+      loop: "{{ node_rules | product(cluster_ips) | list }}"
+      vars:
+        node_rules:
+          - {port: "2379:2380", proto: tcp}
+          - {port: "6443", proto: tcp}
+          - {port: "10250", proto: tcp}
+          - {port: "8472", proto: udp}
+          - {port: "7946", proto: any}
+          - {port: "9100", proto: tcp, comment: node-exporter}
+
+    - name: Enable firewall
+      community.general.ufw:
+        state: enabled
+
+    # ---- SSH ----
+    - name: Remove duplicate lines from authorized_keys
+      ansible.builtin.shell: |
+        f=/home/{{ ansible_user }}/.ssh/authorized_keys
+        [ -f "$f" ] || exit 0
+        awk '!seen[$0]++' "$f" > "$f.dedup"
+        if cmp -s "$f" "$f.dedup"; then rm "$f.dedup"; else
+          {% if ansible_check_mode %}rm "$f.dedup"{% else %}cat "$f.dedup" > "$f" && rm "$f.dedup"{% endif %}; echo changed
+        fi
+      register: dedup
+      changed_when: "'changed' in dedup.stdout"
+      check_mode: false
+
+    # ---- Longhorn disk ----
+    - name: Look for the Longhorn disk
+      ansible.builtin.command: "blkid -t {{ longhorn_disk.src }} -o device"
+      register: lh_dev
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: longhorn_disk is defined
+
+    - name: Warn when the Longhorn disk is missing
+      ansible.builtin.debug:
+        msg: >-
+          {{ longhorn_disk.src }} not found on {{ inventory_hostname }}. Plug the disk in, or format a
+          new one with 'sudo mkfs.ext4 -L longhorn /dev/sdX' and set src to LABEL=longhorn in host_vars.
+      when: longhorn_disk is defined and lh_dev.rc != 0
+
+    - name: Mount the Longhorn disk
+      ansible.posix.mount:
+        src: "{{ longhorn_disk.src }}"
+        path: "{{ longhorn_disk.path }}"
+        fstype: ext4
+        opts: "{{ longhorn_disk.opts }}"
+        passno: "2"
+        state: mounted
+      when: longhorn_disk is defined and lh_dev.rc == 0
+
+    - name: Run pending handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Reboot reminder
+      ansible.builtin.debug:
+        msg: "Boot or kernel-module settings changed on {{ inventory_hostname }}: reboot it when convenient."
+      when: reboot_needed | default(false)
