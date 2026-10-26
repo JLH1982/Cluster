@@ -15,7 +15,7 @@ running and only changes the differences.
 | `01-hosts.yml` | OS setup on all Pis: packages, kernel settings, IPv6 off, firewall (SSH only from the LAN and the Teleport VPN, 192.168.2.0/24), fail2ban (never bans your phone, laptop or tablet), SSH keys only (no passwords, no root), per-session sudo, journal kept on disk, no swap, Bluetooth/avahi/udisks2/rpcbind off, automatic updates with staggered reboots, Longhorn disks |
 | `02-k3s.yml` | Installs k3s (master first, then node2/node3, then node1). Never touches a running node |
 | `03-platform.yml` | MetalLB, Traefik, cert-manager, Longhorn, Prometheus/Grafana, Loki + Alloy (problem logs), CloudNativePG |
-| `04-apps.yml` | Cloudflare tunnel, Authentik, portfolio site + visitor log, pool supply sample page (pool.hinkel-net.com), onion site, Immich, Home Assistant + Z-Wave, Uptime Kuma, homepage (www), UniFi Poller |
+| `04-apps.yml` | Cloudflare tunnel, Authentik, portfolio site + visitor log, onion site, Immich, Home Assistant + Z-Wave, Uptime Kuma, homepage (www), UniFi Poller |
 | `05-maintenance.yml` | Weekly etcd defrag, daily Immich patch-update and daily cloudflared update timers on the master |
 | `backup.yml` | Copies app data to `backups/<date-time>/` on this laptop |
 | `restore-data.yml` | Puts a backup's data back into a (re)built cluster |
@@ -190,7 +190,7 @@ Transforms > **Add visitor location headers** (turned on 2026-10-25). The app al
 reverse-DNS name (domain) and the owner of the IP block (RDAP: a company, university or ISP).
 
 Set in the Cloudflare dashboard, not by these scripts: that setting, and the admin.hinkel-net.com
-tunnel route and DNS record (added 2026-10-26), and the same for pool.hinkel-net.com. Also there: the bare domain hinkel-net.com goes to
+tunnel route and DNS record (added 2026-10-26). Also there: the bare domain hinkel-net.com goes to
 the portfolio (Rules > Redirect Rules > "Bare domain to the portfolio", 301, keeps the path), and
 the block list: account IP list `honeypot_attackers` (Manage Account > Configurations > Lists) and the
 zone rule Security > WAF > Custom rules > "Block honeypot attackers" (added 2026-10-26).

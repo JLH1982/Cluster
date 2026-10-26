@@ -1,4 +1,4 @@
-# Apps: Cloudflare tunnel, Authentik, portfolio website + visitor log, database backups, onion site, Immich, Home Assistant, Uptime Kuma, homepage, UniFi Poller, pool supply page.
+# Apps: Cloudflare tunnel, Authentik, portfolio website + visitor log, database backups, onion site, Immich, Home Assistant, Uptime Kuma, homepage, UniFi Poller.
 # Secrets come from the vault. App data (photos, configs, site files) is restored separately
 # with playbooks/restore-data.yml.
 - name: Apps
@@ -322,10 +322,6 @@
     # ---- Homepage (www.hinkel-net.com) ----
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars: {src: apps/homepage.yaml}
-
-    # ---- Pool supply catalog (pool.hinkel-net.com, a static sample page) ----
-    - ansible.builtin.include_tasks: tasks/kube-apply.yml
-      vars: {src: apps/pool.yaml}
 
     # ---- Database backups to S3 (Authentik and the visitor log; Immich backs up its own) ----
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
