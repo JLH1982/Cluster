@@ -1,6 +1,6 @@
 # Homepage - link page for everything on the cluster
 #   https://www.hinkel-net.com (Cloudflare tunnel, protected by Cloudflare Access)
-#   http://home.10.0.20.230.sslip.io (home network)
+#   https://home.lan.hinkel-net.com (home network and VPN, behind the Authentik login)
 # Edit the HTML below and re-apply; the page updates within about a minute.
 apiVersion: v1
 kind: Namespace
@@ -103,32 +103,42 @@ data:
         </a>
       </div>
 
-      <h2>Home network <small>&middot; only work on home Wi-Fi</small></h2>
+      <h2>Home network <small>&middot; only work at home or on the VPN</small></h2>
       <div class="grid">
-        <a class="card" href="http://uptime.10.0.20.230.sslip.io">
+        <a class="card" href="https://uptime.lan.hinkel-net.com">
           <div class="name"><span class="icon">📈</span>Uptime Kuma<span class="badge">home</span></div>
           <div class="desc">Up/down checks, phone alerts</div>
-          <div class="url">uptime.10.0.20.230.sslip.io</div>
+          <div class="url">uptime.lan.hinkel-net.com</div>
         </a>
-        <a class="card" href="http://grafana.10.0.20.230.sslip.io">
+        <a class="card" href="https://grafana.lan.hinkel-net.com">
           <div class="name"><span class="icon">📊</span>Grafana<span class="badge">home</span></div>
           <div class="desc">Cluster dashboards</div>
-          <div class="url">grafana.10.0.20.230.sslip.io</div>
+          <div class="url">grafana.lan.hinkel-net.com</div>
         </a>
-        <a class="card" href="http://longhorn.10.0.20.230.sslip.io">
+        <a class="card" href="https://grafana.lan.hinkel-net.com/d/portfolio-visitors">
+          <div class="name"><span class="icon">🌎</span>Portfolio visitors<span class="badge">home</span></div>
+          <div class="desc">Map of who viewed the portfolio</div>
+          <div class="url">grafana.lan.hinkel-net.com/d/portfolio-visitors</div>
+        </a>
+        <a class="card" href="https://longhorn.lan.hinkel-net.com">
           <div class="name"><span class="icon">💾</span>Longhorn<span class="badge">home</span></div>
           <div class="desc">Storage and volumes</div>
-          <div class="url">longhorn.10.0.20.230.sslip.io</div>
+          <div class="url">longhorn.lan.hinkel-net.com</div>
         </a>
-        <a class="card" href="http://ha.10.0.20.230.sslip.io">
+        <a class="card" href="https://ha.lan.hinkel-net.com">
           <div class="name"><span class="icon">🏠</span>Home Assistant (local)<span class="badge">home</span></div>
           <div class="desc">Direct, without Cloudflare</div>
-          <div class="url">ha.10.0.20.230.sslip.io</div>
+          <div class="url">ha.lan.hinkel-net.com</div>
         </a>
-        <a class="card" href="http://zwave.10.0.20.230.sslip.io">
+        <a class="card" href="https://zwave.lan.hinkel-net.com">
           <div class="name"><span class="icon">📡</span>Z-Wave JS UI<span class="badge">home</span></div>
           <div class="desc">ZWA-2 stick on node3</div>
-          <div class="url">zwave.10.0.20.230.sslip.io</div>
+          <div class="url">zwave.lan.hinkel-net.com</div>
+        </a>
+        <a class="card" href="https://auth.lan.hinkel-net.com">
+          <div class="name"><span class="icon">🔑</span>Authentik<span class="badge">home</span></div>
+          <div class="desc">Login, MFA and users for these apps</div>
+          <div class="url">auth.lan.hinkel-net.com</div>
         </a>
         <a class="card" href="https://10.0.20.1">
           <div class="name"><span class="icon">🌐</span>Router<span class="badge">home</span></div>
@@ -153,6 +163,11 @@ data:
           <div class="name"><span class="icon">🛰️</span>UniFi Site Manager</div>
           <div class="desc">Router from anywhere</div>
           <div class="url">unifi.ui.com</div>
+        </a>
+        <a class="card" href="https://us-east-2.console.aws.amazon.com/s3/buckets?region=us-east-2">
+          <div class="name"><span class="icon">🪣</span>AWS S3 backups</div>
+          <div class="desc">Nightly photo copies and encrypted cluster backups</div>
+          <div class="url">s3.console.aws.amazon.com</div>
         </a>
       </div>
 
@@ -246,7 +261,20 @@ spec:
                 name: homepage
                 port:
                   name: http
-    - host: home.10.0.20.230.sslip.io
+---
+# Home network name, behind the Authentik login (www keeps the Cloudflare Access login)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: homepage-lan
+  namespace: homepage
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: traefik-redirect-https@kubernetescrd,authentik-authentik@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: home.lan.hinkel-net.com
       http:
         paths:
           - path: /

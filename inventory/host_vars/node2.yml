@@ -4,3 +4,6 @@ pi_config:
   arm_boost: "1"
   arm_freq: "2800"
   over_voltage_delta: "50000"
+
+# When unattended-upgrades may reboot this Pi if an update needs it (staggered so etcd keeps quorum)
+reboot_time: "04:00"

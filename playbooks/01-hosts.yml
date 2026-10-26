@@ -1,4 +1,5 @@
-# Base OS setup for every Pi: packages, kernel settings, firewall, fail2ban, Longhorn disk.
+# Base OS setup for every Pi: packages, kernel settings, firewall, SSH/sudo hardening, logs, services,
+# updates, Longhorn disk.
 # Safe to re-run; changes that need a reboot are reported at the end.
 - name: Prepare cluster hosts
   hosts: k3s_cluster
@@ -16,6 +17,16 @@
     - name: Reboot needed
       ansible.builtin.set_fact:
         reboot_needed: true
+    - name: Reload SSH
+      ansible.builtin.systemd_service:
+        name: ssh
+        state: reloaded
+    - name: Restart journald
+      ansible.builtin.shell: systemctl restart systemd-journald && journalctl --flush
+    - name: Reload fail2ban
+      ansible.builtin.command: fail2ban-client reload
+    - name: Regenerate swap units
+      ansible.builtin.shell: systemctl daemon-reload && systemctl reset-failed
   tasks:
     - name: Set timezone
       community.general.timezone:
@@ -116,11 +127,20 @@
         - {dir: outgoing, policy: allow}
         - {dir: routed, policy: deny}
 
-    - name: Allow SSH from anywhere
+    - name: Allow SSH from the LAN and the VPN
       community.general.ufw:
         rule: allow
         port: "22"
         proto: tcp
+        from_ip: "{{ item }}"
+      loop: "{{ ssh_allowed_cidrs }}"
+
+    - name: Remove the old allow-SSH-from-anywhere rule
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+        delete: true
 
     - name: Allow Kubernetes API from the LAN
       community.general.ufw:
@@ -168,6 +188,113 @@
       register: dedup
       changed_when: "'changed' in dedup.stdout"
       check_mode: false
+
+    - name: Look for SSH keys
+      ansible.builtin.stat:
+        path: /home/{{ ansible_user }}/.ssh/authorized_keys
+      register: authkeys
+
+    - name: Stop if there are no SSH keys (turning off passwords would lock you out)
+      ansible.builtin.assert:
+        that: authkeys.stat.exists and authkeys.stat.size > 0
+        fail_msg: "No SSH keys for {{ ansible_user }} on {{ inventory_hostname }}. Add one with ssh-copy-id first."
+
+    # 01- sorts before cloud-init's 50-cloud-init.conf, and sshd uses the first value it reads.
+    - name: SSH hardening (keys only, no root, no X11)
+      ansible.builtin.copy:
+        src: ../files/host/sshd/01-hardening.conf
+        dest: /etc/ssh/sshd_config.d/01-hardening.conf
+        mode: "0644"
+        validate: sshd -t -f %s
+      notify: Reload SSH
+
+    - name: Never ban your own devices in fail2ban
+      ansible.builtin.copy:
+        content: |
+          # Managed by Ansible (01-hosts.yml). *.local files are read after the Debian defaults.
+          [DEFAULT]
+          ignoreip = 127.0.0.1/8 {{ fail2ban_ignore_ips | join(' ') }}
+        dest: /etc/fail2ban/jail.d/cluster.local
+        mode: "0644"
+      notify: Reload fail2ban
+
+    # ---- Sudo ----
+    # Raspberry Pi OS's 010_global-tty lets any session reuse a recent sudo; later files win.
+    - name: Make sudo ask for the password per session
+      ansible.builtin.copy:
+        content: |
+          # Managed by Ansible (01-hosts.yml). Overrides 010_global-tty.
+          Defaults timestamp_type=tty
+        dest: /etc/sudoers.d/zz-cluster
+        mode: "0440"
+        validate: visudo -cf %s
+
+    # ---- Logs ----
+    - name: Keep the system journal on disk across reboots
+      ansible.builtin.copy:
+        src: ../files/host/journald/90-cluster.conf
+        dest: /etc/systemd/journald.conf.d/
+        mode: "0644"
+      notify: Restart journald
+
+    # ---- Swap ----
+    - name: Swap configuration folder
+      ansible.builtin.file:
+        path: /etc/rpi/swap.conf.d
+        state: directory
+        mode: "0755"
+
+    - name: No swap (Kubernetes runs without it)
+      ansible.builtin.copy:
+        src: ../files/host/swap/90-cluster.conf
+        dest: /etc/rpi/swap.conf.d/
+        mode: "0644"
+      notify: Regenerate swap units
+
+    # ---- Unused services ----
+    # Bluetooth is off in firmware; avahi only publishes <host>.local names (Ansible and k3s use IPs);
+    # udisks2 auto-mounts desktop USB drives.
+    - name: Turn off Bluetooth, avahi and udisks2
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      loop: [bluetooth.service, avahi-daemon.socket, avahi-daemon.service, udisks2.service]
+
+    # Only NFSv3 needs rpcbind; Longhorn's NFS backup target uses NFSv4.
+    - name: Turn off rpcbind (port 111)
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop: [rpcbind.socket, rpcbind.service]
+
+    # ---- Updates ----
+    # The stock Allowed-Origins match a=trixie-security, but Debian's archive is "stable-security",
+    # so nothing was ever installed. Match on codename instead. Reboots (only when an update needs
+    # one) happen at each Pi's reboot_time, staggered so etcd keeps quorum.
+    - name: Automatic updates and reboots
+      ansible.builtin.copy:
+        content: |
+          // Managed by Ansible (01-hosts.yml)
+          Unattended-Upgrade::Origins-Pattern {
+                  "origin=Debian,codename=${distro_codename},label=Debian";
+                  "origin=Debian,codename=${distro_codename}-updates";
+                  "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+                  "origin=Raspberry Pi Foundation,codename=${distro_codename}";
+          };
+          Unattended-Upgrade::Automatic-Reboot "true";
+          Unattended-Upgrade::Automatic-Reboot-WithUsers "true";
+          Unattended-Upgrade::Automatic-Reboot-Time "{{ reboot_time }}";
+        dest: /etc/apt/apt.conf.d/52cluster-unattended-upgrades
+        mode: "0644"
+
+    - name: Install waiting updates now (-e apply_updates=true)
+      ansible.builtin.apt:
+        upgrade: safe
+        update_cache: true
+      when: apply_updates | default(false) | bool
 
     # ---- Longhorn disk ----
     - name: Look for the Longhorn disk

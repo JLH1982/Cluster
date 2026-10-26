@@ -47,6 +47,12 @@ server:
             - path: "/"
               service:
                 identifier: main
+        # Home-network address for the app: skips Cloudflare's 100 MB upload limit (large videos)
+        - host: photos.lan.hinkel-net.com
+          paths:
+            - path: "/"
+              service:
+                identifier: main
 
 machine-learning:
   controllers:

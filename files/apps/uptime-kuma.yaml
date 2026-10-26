@@ -1,5 +1,5 @@
 # Uptime Kuma - uptime monitoring and alerts
-#   http://uptime.10.0.20.230.sslip.io
+#   https://uptime.lan.hinkel-net.com (behind the Authentik login)
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -84,13 +84,36 @@ metadata:
   namespace: uptime-kuma
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: traefik-redirect-https@kubernetescrd,authentik-authentik@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
-    - host: uptime.10.0.20.230.sslip.io
+    - host: uptime.lan.hinkel-net.com
       http:
         paths:
           - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: uptime-kuma
+                port:
+                  name: http
+---
+# Push monitors (e.g. the Immich S3 backup job) report to /api/push/<token> without a login
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: uptime-kuma-push
+  namespace: uptime-kuma
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: uptime.lan.hinkel-net.com
+      http:
+        paths:
+          - path: /api/push/
             pathType: Prefix
             backend:
               service:

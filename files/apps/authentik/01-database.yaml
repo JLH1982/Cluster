@@ -1,0 +1,37 @@
+# Authentik: single sign-on for the home-network apps, at https://auth.lan.hinkel-net.com
+# (home network and VPN only). The www login stays on Cloudflare Access + AWS Cognito.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: authentik
+---
+# Postgres for Authentik via CloudNativePG (users, MFA devices, sessions).
+# The password secret (authentik-postgres-secret) is created separately and not stored in this file.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: authentik-database
+  namespace: authentik
+spec:
+  instances: 2
+
+  storage:
+    size: 5Gi
+    storageClass: local-path
+
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {memory: 512Mi}
+
+  bootstrap:
+    initdb:
+      database: authentik
+      owner: authentik
+      secret:
+        name: authentik-postgres-secret
+
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+
+  primaryUpdateStrategy: unsupervised

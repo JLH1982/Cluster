@@ -9,3 +9,6 @@ longhorn_disk:
 pi_config:
   arm_freq: "3000"
   over_voltage_delta: "50000"
+
+# When unattended-upgrades may reboot this Pi if an update needs it (staggered so etcd keeps quorum)
+reboot_time: "03:30"

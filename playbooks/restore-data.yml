@@ -1,6 +1,6 @@
 # Restore app data from a laptop backup into a (re)built cluster.
 #   ansible-playbook playbooks/restore-data.yml -e backup=backups/2026-10-20-1830 -e confirm=yes
-# Optional: -e only=home-assistant,immich-db  (restore just those items)
+# Optional: -e only=home-assistant,immich-db,authentik-db,visitor-log-db  (restore just those items)
 # Each app is stopped, its volume is wiped and refilled from the backup, and it is started again.
 - name: Restore app data
   hosts: k3s_init
@@ -68,6 +68,70 @@
 
         - name: Start Immich
           ansible.builtin.command: kubectl -n immich scale deploy immich-server immich-machine-learning --replicas=1
+
+    - name: Restore the Authentik database
+      when:
+        - (src_dir ~ '/authentik-db.dump') is file
+        - not only_list or 'authentik-db' in only_list
+      block:
+        - name: Upload the database dump
+          ansible.builtin.copy:
+            src: "{{ src_dir }}/authentik-db.dump"
+            dest: "{{ stage }}/authentik-db.dump"
+            mode: "0600"
+
+        - name: Stop Authentik
+          ansible.builtin.command: kubectl -n authentik scale deploy authentik-server authentik-worker --replicas=0
+
+        - name: Find the database primary
+          ansible.builtin.command: >-
+            kubectl -n authentik get clusters.postgresql.cnpg.io authentik-database -o jsonpath={.status.currentPrimary}
+          register: ak_primary
+          changed_when: false
+
+        - name: Load the dump
+          ansible.builtin.shell: >-
+            kubectl -n authentik exec -i {{ ak_primary.stdout }} -c postgres --
+            pg_restore -U postgres -d authentik --clean --if-exists --no-owner --role=authentik
+            < {{ stage }}/authentik-db.dump
+          register: ak_restore
+          # pg_restore exits 1 on harmless warnings (e.g. objects that did not exist yet)
+          failed_when: ak_restore.rc > 1
+
+        - name: Start Authentik
+          ansible.builtin.command: kubectl -n authentik scale deploy authentik-server authentik-worker --replicas=1
+
+    - name: Restore the visitor log database
+      when:
+        - (src_dir ~ '/visitor-log-db.dump') is file
+        - not only_list or 'visitor-log-db' in only_list
+      block:
+        - name: Upload the database dump
+          ansible.builtin.copy:
+            src: "{{ src_dir }}/visitor-log-db.dump"
+            dest: "{{ stage }}/visitor-log-db.dump"
+            mode: "0600"
+
+        - name: Stop the visitor log
+          ansible.builtin.command: kubectl -n visitor-log scale deploy visitor-log --replicas=0
+
+        - name: Find the database primary
+          ansible.builtin.command: >-
+            kubectl -n visitor-log get clusters.postgresql.cnpg.io visitor-log-database -o jsonpath={.status.currentPrimary}
+          register: vl_primary
+          changed_when: false
+
+        - name: Load the dump
+          ansible.builtin.shell: >-
+            kubectl -n visitor-log exec -i {{ vl_primary.stdout }} -c postgres --
+            pg_restore -U postgres -d visitorlog --clean --if-exists --no-owner --role=visitorlog
+            < {{ stage }}/visitor-log-db.dump
+          register: vl_restore
+          # pg_restore exits 1 on harmless warnings (e.g. objects that did not exist yet)
+          failed_when: vl_restore.rc > 1
+
+        - name: Start the visitor log
+          ansible.builtin.command: kubectl -n visitor-log scale deploy visitor-log --replicas=1
 
     - name: Remove the staging folder
       ansible.builtin.file:

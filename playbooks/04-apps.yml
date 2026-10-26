@@ -1,4 +1,4 @@
-# Apps: Cloudflare tunnel, portfolio website, onion site, Immich, Home Assistant, Uptime Kuma, homepage, UniFi Poller.
+# Apps: Cloudflare tunnel, Authentik, portfolio website + visitor log, onion site, Immich, Home Assistant, Uptime Kuma, homepage, UniFi Poller.
 # Secrets come from the vault. App data (photos, configs, site files) is restored separately
 # with playbooks/restore-data.yml.
 - name: Apps
@@ -12,7 +12,7 @@
         path: "{{ config_dir }}/{{ item }}"
         state: directory
         mode: "0755"
-      loop: [apps, apps/immich]
+      loop: [apps, apps/immich, apps/authentik]
       check_mode: false
 
     # ---- Cloudflare tunnel ----
@@ -46,9 +46,87 @@
           metadata: {name: cloudflared-token, namespace: cloudflare}
           stringData: {token: "{{ vault_cloudflared_token }}"}
 
+    # ---- Authentik (single sign-on for the home-network apps) ----
+    # Before the apps: their Ingresses use its forward-auth middleware.
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/authentik/01-database.yaml}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: authentik-postgres-secret
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: kubernetes.io/basic-auth
+          metadata: {name: authentik-postgres-secret, namespace: authentik}
+          stringData:
+            username: authentik
+            password: "{{ vault_authentik_db_password }}"
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: authentik-secrets
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: authentik-secrets, namespace: authentik}
+          stringData: "{{ vault_authentik_secrets }}"
+
+    - name: Wait for the Authentik database
+      ansible.builtin.command: >-
+        kubectl -n authentik wait clusters.postgresql.cnpg.io/authentik-database
+        --for=condition=Ready --timeout=600s
+      changed_when: false
+      when: not ansible_check_mode
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      loop: [apps/authentik/02-blueprint.yaml, apps/authentik/03-forward-auth.yaml]
+      loop_control: {loop_var: src}
+
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars:
+        release: authentik
+        ns: authentik
+        chart: authentik/authentik
+        version: "{{ authentik_chart_version }}"
+        values: apps/authentik/values.yaml
+        wait_timeout: 15m
+
     # ---- Websites ----
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars: {src: apps/website.yaml}
+
+    # Portfolio visitor log (shown in Grafana's "Portfolio Visitors" dashboard)
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/visitor-log/01-database.yaml}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: "{{ item.name }}"
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: kubernetes.io/basic-auth
+          metadata: {name: "{{ item.name }}", namespace: visitor-log}
+          stringData: {username: "{{ item.user }}", password: "{{ item.password }}"}
+      loop:
+        - {name: visitor-log-db, user: visitorlog, password: "{{ vault_visitor_log_db_password }}"}
+        - {name: visitor-log-grafana, user: grafana, password: "{{ vault_visitor_log_grafana_db_password }}"}
+      loop_control: {label: "{{ item.name }}"}
+
+    - name: Wait for the visitor log database
+      ansible.builtin.command: >-
+        kubectl -n visitor-log wait clusters.postgresql.cnpg.io/visitor-log-database
+        --for=condition=Ready --timeout=600s
+      changed_when: false
+      when: not ansible_check_mode
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/visitor-log/02-logger.yaml}
 
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars: {src: apps/darkweb.yaml}
@@ -123,6 +201,22 @@
         remote_values: /home/kube/immich/values.yaml
         values_dict: "{{ lookup('template', '../files/apps/immich/values.yaml.j2') | from_yaml }}"
         wait_timeout: 15m
+
+    # Nightly off-site copy of the photo library to S3 (bucket and AWS user are created by hand,
+    # see README "Photo backup to S3")
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: immich-s3-backup
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: immich-s3-backup, namespace: immich}
+          stringData: "{{ vault_immich_s3_backup }}"
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/immich/03-s3-backup.yaml}
 
     # ---- Home Assistant + Z-Wave ----
     - ansible.builtin.include_tasks: tasks/kube-apply.yml

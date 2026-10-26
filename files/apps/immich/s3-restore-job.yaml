@@ -1,0 +1,45 @@
+# ONE-OFF RESTORE (not applied by the playbooks): copies the Immich data folder back from S3 into
+# the immich-library volume. Used during a rebuild - see REBUILD.md step 7.
+#   kubectl -n immich scale deploy/immich-server --replicas=0
+#   kubectl apply -f s3-restore-job.yaml && kubectl -n immich wait --for=condition=complete job/immich-s3-restore --timeout=2h
+#   kubectl -n immich delete job immich-s3-restore && kubectl -n immich scale deploy/immich-server --replicas=1
+# "copy" never deletes anything already in the volume.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: immich-s3-restore
+  namespace: immich
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: rclone
+          image: rclone/rclone:1.75.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              rclone copy ":s3,provider=AWS,env_auth=true,region=us-east-2,no_check_bucket=true:<your-immich-backup-bucket>/immich-data" /data \
+                --transfers 4 --checkers 8 --stats-one-line --stats 1m -v
+              echo "Restore finished"
+          envFrom:
+            - secretRef:
+                name: immich-s3-backup
+          env:
+            - name: HOME
+              value: /tmp
+            - name: RCLONE_CONFIG
+              value: /tmp/rclone.conf
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: immich-library
+        - name: tmp
+          emptyDir: {}

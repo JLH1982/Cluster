@@ -1,0 +1,45 @@
+# Helm values for goauthentik/authentik. Secrets are in the authentik-secrets Secret (from the vault):
+#   AUTHENTIK_SECRET_KEY  - signs sessions and tokens; changing it logs everyone out
+#   GRAFANA_OIDC_SECRET   - Grafana's OIDC client secret (read by the blueprint, see 02-blueprint.yaml)
+authentik:
+  existingSecret:
+    secretName: authentik-secrets
+  error_reporting:
+    enabled: false
+
+global:
+  env:
+    - name: AUTHENTIK_POSTGRESQL__HOST
+      value: authentik-database-rw
+    - name: AUTHENTIK_POSTGRESQL__NAME
+      value: authentik
+    - name: AUTHENTIK_POSTGRESQL__USER
+      value: authentik
+    - name: AUTHENTIK_POSTGRESQL__PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: authentik-postgres-secret
+          key: password
+
+server:
+  resources:
+    requests: {cpu: 100m, memory: 512Mi}
+    limits: {memory: 1Gi}
+  ingress:
+    enabled: true
+    ingressClassName: traefik
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+      traefik.ingress.kubernetes.io/router.middlewares: traefik-redirect-https@kubernetescrd
+    hosts:
+      - auth.lan.hinkel-net.com
+
+worker:
+  resources:
+    requests: {cpu: 100m, memory: 384Mi}
+    limits: {memory: 1Gi}
+
+# Applications and providers, created and kept in sync by Authentik itself
+blueprints:
+  configMaps:
+    - authentik-blueprints

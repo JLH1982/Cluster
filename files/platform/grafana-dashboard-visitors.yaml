@@ -1,0 +1,525 @@
+# Grafana dashboard "Portfolio Visitors": a world map of who opened the portfolio site, and tables
+# of the networks (companies, ISPs) the visits came from. Data: the visitor log
+# (files/apps/visitor-log/) through the "Portfolio visitors" datasource (helm-values/prometheus.yaml).
+# Loaded by the Grafana dashboard sidecar (label grafana_dashboard=1).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-portfolio-visitors
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  portfolio-visitors.json: |
+    {
+      "uid": "portfolio-visitors",
+      "title": "Portfolio Visitors",
+      "tags": [
+        "portfolio"
+      ],
+      "description": "Who opened https://portfolio.hinkel-net.com, from the visitor log (files/apps/visitor-log/).",
+      "timezone": "America/Chicago",
+      "editable": true,
+      "schemaVersion": 39,
+      "version": 1,
+      "time": {
+        "from": "now-30d",
+        "to": "now"
+      },
+      "refresh": "5m",
+      "graphTooltip": 0,
+      "annotations": {
+        "list": []
+      },
+      "links": [],
+      "templating": {
+        "list": [
+          {
+            "name": "search",
+            "label": "Search (company, domain, city)",
+            "type": "textbox",
+            "query": "",
+            "current": {
+              "text": "",
+              "value": ""
+            },
+            "hide": 0
+          },
+          {
+            "name": "bots",
+            "label": "Bots and monitors",
+            "type": "custom",
+            "query": "Hide : false,Show : true",
+            "current": {
+              "text": "Hide",
+              "value": "false"
+            },
+            "options": [
+              {
+                "text": "Hide",
+                "value": "false",
+                "selected": true
+              },
+              {
+                "text": "Show",
+                "value": "true",
+                "selected": false
+              }
+            ],
+            "hide": 0,
+            "multi": false,
+            "includeAll": false
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Page views",
+          "description": "Pages opened (and PDFs downloaded) in the time range.",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "portfolio-visitors"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 0,
+            "y": 0
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT count(*) AS views FROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              },
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "value",
+            "justifyMode": "center"
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Organisations",
+          "description": "Different networks the visits came from (IP-block owner, else reverse-DNS domain).",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "portfolio-visitors"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 6,
+            "y": 0
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT count(DISTINCT coalesce(org, domain)) AS orgs FROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              },
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "value",
+            "justifyMode": "center"
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Places",
+          "description": "Different cities.",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "portfolio-visitors"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 12,
+            "y": 0
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT count(DISTINCT (city, country)) AS places FROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              },
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "value",
+            "justifyMode": "center"
+          }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Last visit",
+          "description": "Most recent page view.",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "portfolio-visitors"
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 6,
+            "x": 18,
+            "y": 0
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT max(ts) AS last FROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              },
+              "unit": "dateTimeFromNow"
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "value",
+            "justifyMode": "center"
+          }
+        },
+        {
+          "id": 5,
+          "type": "geomap",
+          "title": "Where visitors are",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "portfolio-visitors"
+          },
+          "description": "One dot per city; bigger dots had more page views, and the number shows when there was more than one.",
+          "gridPos": {
+            "h": 15,
+            "w": 24,
+            "x": 0,
+            "y": 4
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT city, region, country, lat AS latitude, lon AS longitude, count(*) AS visits,\n  CASE WHEN count(*) > 1 THEN count(*)::text ELSE '' END AS label\nFROM visits WHERE lat IS NOT NULL AND $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY city, region, country, lat, lon"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "view": {
+              "id": "coords",
+              "lat": 30,
+              "lon": -40,
+              "zoom": 2.2,
+              "allLayers": true
+            },
+            "controls": {
+              "showZoom": true,
+              "mouseWheelZoom": true,
+              "showAttribution": true
+            },
+            "basemap": {
+              "type": "default",
+              "name": "Basemap",
+              "config": {}
+            },
+            "tooltip": {
+              "mode": "details"
+            },
+            "layers": [
+              {
+                "type": "markers",
+                "name": "Visitors",
+                "tooltip": true,
+                "location": {
+                  "mode": "coords",
+                  "latitude": "latitude",
+                  "longitude": "longitude"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": "img/icons/marker/circle.svg"
+                    },
+                    "symbolAlign": {
+                      "horizontal": "center",
+                      "vertical": "center"
+                    },
+                    "color": {
+                      "fixed": "blue"
+                    },
+                    "opacity": 0.85,
+                    "size": {
+                      "field": "visits",
+                      "fixed": 9,
+                      "min": 9,
+                      "max": 24
+                    }
+                  }
+                }
+              },
+              {
+                "type": "markers",
+                "name": "Counts",
+                "tooltip": false,
+                "location": {
+                  "mode": "coords",
+                  "latitude": "latitude",
+                  "longitude": "longitude"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": ""
+                    },
+                    "color": {
+                      "fixed": "white"
+                    },
+                    "opacity": 1,
+                    "size": {
+                      "fixed": 9
+                    },
+                    "text": {
+                      "mode": "field",
+                      "field": "label",
+                      "fixed": ""
+                    },
+                    "textConfig": {
+                      "fontSize": 11,
+                      "textAlign": "center",
+                      "textBaseline": "middle",
+                      "offsetX": 0,
+                      "offsetY": 0
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": 6,
+          "type": "table",
+          "title": "Who visited",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "portfolio-visitors"
+          },
+          "description": "Grouped by network owner. A company on its own network shows up by name in Organisation or Domain; a home or mobile connection shows the ISP (Comcast, Verizon...).",
+          "gridPos": {
+            "h": 11,
+            "w": 24,
+            "x": 0,
+            "y": 19
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT org AS \"Organisation\", domain AS \"Domain\", city AS \"City\", region AS \"Region\", country AS \"Country\",\n  count(*) AS \"Views\", string_agg(DISTINCT path, ' ') AS \"Pages\", min(ts) AS \"First\", max(ts) AS \"Last\"\nFROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY org, domain, city, region, country\nORDER BY max(ts) DESC"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "filterable": true
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Pages"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 260
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm"
+          }
+        },
+        {
+          "id": 7,
+          "type": "table",
+          "title": "Recent visits (IP addresses are kept 7 days)",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "portfolio-visitors"
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 30
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT ts AS \"Time\", host(ip) AS \"IP\", hostname AS \"Reverse DNS\", org AS \"Organisation\", domain AS \"Domain\",\n  city AS \"City\", country AS \"Country\", path AS \"Page\", referer AS \"From\", user_agent AS \"Browser\", bot AS \"Bot\"\nFROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'\nORDER BY ts DESC LIMIT 500"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "filterable": true
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Browser"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 300
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm"
+          }
+        }
+      ]
+    }

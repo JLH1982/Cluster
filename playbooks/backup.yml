@@ -1,8 +1,9 @@
 # Back up app data from the cluster to this laptop (backups/<timestamp>/).
 #   ansible-playbook playbooks/backup.yml
-# Contents: Immich database, Home Assistant config, Z-Wave store, Uptime Kuma data,
+# Contents: Immich and Authentik databases, Home Assistant config, Z-Wave store, Uptime Kuma data,
 # both websites' files, and an etcd snapshot (all Kubernetes objects, secrets included).
-# NOT included: Immich photo files (too large for the laptop) - those need an off-site backup.
+# NOT included: Immich photo files - those go to S3 nightly (immich-s3-backup CronJob).
+# At the end, this folder + the new backup are encrypted and uploaded to S3 (offsite_bucket).
 - name: Back up cluster data
   hosts: k3s_init
   become: true
@@ -46,6 +47,28 @@
         kubectl -n immich exec {{ pg_primary.stdout }} -c postgres -- pg_dump -U postgres -d immich -Fc
         > {{ dest }}/immich-db.dump && test -s {{ dest }}/immich-db.dump
 
+    - name: Find the Authentik database primary
+      ansible.builtin.command: >-
+        kubectl -n authentik get clusters.postgresql.cnpg.io authentik-database -o jsonpath={.status.currentPrimary}
+      register: ak_primary
+      changed_when: false
+
+    - name: Dump the Authentik database (users, MFA devices)
+      ansible.builtin.shell: >-
+        kubectl -n authentik exec {{ ak_primary.stdout }} -c postgres -- pg_dump -U postgres -d authentik -Fc
+        > {{ dest }}/authentik-db.dump && test -s {{ dest }}/authentik-db.dump
+
+    - name: Find the visitor log database primary
+      ansible.builtin.command: >-
+        kubectl -n visitor-log get clusters.postgresql.cnpg.io visitor-log-database -o jsonpath={.status.currentPrimary}
+      register: vl_primary
+      changed_when: false
+
+    - name: Dump the visitor log database (portfolio visits)
+      ansible.builtin.shell: >-
+        kubectl -n visitor-log exec {{ vl_primary.stdout }} -c postgres -- pg_dump -U postgres -d visitorlog -Fc
+        > {{ dest }}/visitor-log-db.dump && test -s {{ dest }}/visitor-log-db.dump
+
     - name: Archive app volumes
       ansible.builtin.shell: >-
         set -o pipefail;
@@ -84,3 +107,42 @@
     - name: Done
       ansible.builtin.debug:
         msg: "Backup saved to {{ (backup_dir_local ~ '/' ~ stamp) | realpath }}"
+
+# Off-site copy: this project folder (scripts + encrypted vault) and the backup just taken, as one
+# archive encrypted on the laptop with the Ansible vault password, uploaded to S3. The laptop's
+# AWS profile can only upload (no list/read/delete); download copies from the AWS console.
+# Restore: see REBUILD.md "Laptop gone?".
+- name: Copy the project and this backup to S3
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    stamp: "{{ hostvars[groups['k3s_init'][0]].stamp }}"
+    project_dir: "{{ (playbook_dir ~ '/..') | realpath }}"
+    archive: "/tmp/cluster-ansible-{{ stamp }}.tar.gz.gpg"
+  tasks:
+    - name: Encrypt and upload cluster-ansible-{{ stamp }}.tar.gz.gpg
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        cd "{{ project_dir }}"
+        tar -czf - $(ls -A | grep -vx backups) "backups/{{ stamp }}" |
+          gpg --batch --yes --quiet --pinentry-mode loopback --symmetric --cipher-algo AES256 \
+              --passphrase-file ~/.ansible/cluster-vault-pass -o "{{ archive }}"
+        aws s3 cp --profile "{{ offsite_aws_profile }}" --only-show-errors --storage-class STANDARD_IA \
+          "{{ archive }}" "s3://{{ offsite_bucket }}/cluster-ansible/cluster-ansible-{{ stamp }}.tar.gz.gpg"
+        du -h "{{ archive }}" | cut -f1
+      args:
+        executable: /bin/bash
+      register: offsite
+      when: offsite_bucket | default('') | length > 0
+
+    - name: Remove the local archive
+      ansible.builtin.file:
+        path: "{{ archive }}"
+        state: absent
+
+    - name: Off-site copy done
+      ansible.builtin.debug:
+        msg: "Uploaded {{ offsite.stdout | default('?') }} to s3://{{ offsite_bucket }}/cluster-ansible/cluster-ansible-{{ stamp }}.tar.gz.gpg"
+      when: offsite is not skipped

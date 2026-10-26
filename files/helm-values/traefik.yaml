@@ -2,3 +2,9 @@ service:
   annotations:
     # Keep the same LAN IP after a rebuild: Cloudflare tunnel routes point at it
     metallb.io/loadBalancerIPs: 10.0.20.230
+# HTTPS certificate for every host: the *.lan.hinkel-net.com wildcard from
+# files/platform/lan-certificate.yaml (Traefik's self-signed one until it is issued)
+tlsStore:
+  default:
+    defaultCertificate:
+      secretName: lan-wildcard-tls

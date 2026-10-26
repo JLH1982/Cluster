@@ -14,7 +14,7 @@ spec:
       rules:
         # Alert when a K3s node becomes unreachable
         - alert: K3sNodeDown
-          expr: up{job="kubernetes-nodes"} == 0
+          expr: up{job="node-exporter"} == 0
           for: 5m
           labels:
             severity: critical
@@ -63,14 +63,45 @@ spec:
             description: "Pod has restarted more than 5 times in the last hour."
 
         # Alert when API server latency is high
+        # Same as "99th percentile above 1s": more than 1% of requests took longer than 1s.
+        # Only the 1s and +Inf buckets are kept (see kubeApiServer in helm-values/prometheus.yaml).
         - alert: K3sAPIServerLatencyHigh
-          expr: histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket{verb!~"WATCH|CONNECT"}[5m])) by (le)) > 1  # exclude long-lived watches
+          expr: |
+            (
+              sum(rate(apiserver_request_duration_seconds_bucket{le="+Inf",verb!~"WATCH|CONNECT"}[5m]))
+              - sum(rate(apiserver_request_duration_seconds_bucket{le="1.0",verb!~"WATCH|CONNECT"}[5m]))
+            ) / sum(rate(apiserver_request_duration_seconds_bucket{le="+Inf",verb!~"WATCH|CONNECT"}[5m])) > 0.01
           for: 10m
           labels:
             severity: warning
           annotations:
             summary: "K3s API server latency is high"
             description: "99th percentile API latency is above 1 second."
+
+    - name: prometheus-storage
+      rules:
+        # Prometheus's disk filled on 2026-10-22 and it silently stopped saving data for a day.
+        - alert: PrometheusDiskFilling
+          expr: |
+            kubelet_volume_stats_available_bytes{namespace="monitoring",persistentvolumeclaim=~"prometheus-.*"}
+              / kubelet_volume_stats_capacity_bytes{namespace="monitoring",persistentvolumeclaim=~"prometheus-.*"} < 0.20
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Prometheus disk is over 80% full"
+            description: "{{ $labels.persistentvolumeclaim }} has {{ $value | humanizePercentage }} free. Raise storage or lower retentionSize in helm-values/prometheus.yaml."
+
+        # Works even when the disk is full: no new samples means the node-exporter series go stale
+        # and absent() becomes true.
+        - alert: PrometheusNotSavingData
+          expr: absent(up{job="node-exporter"})
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Prometheus has stored no fresh data for 10 minutes"
+            description: "Grafana charts will be empty. Check the Prometheus logs (disk full, crash loop, or scraping broken)."
 
     - name: k3s-workload-health
       rules:

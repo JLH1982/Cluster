@@ -1,5 +1,27 @@
 alertmanager:
+  # Alerts go to the phone through ntfy (same topic as Uptime Kuma). The topic URL is a secret:
+  # it's in the vault and created as Secret alertmanager-ntfy by playbooks/03-platform.yml.
+  # Lists here replace the chart's; inhibit_rules and the rest of the config are the chart's.
+  config:
+    route:
+      receiver: ntfy
+      group_by: [alertname, namespace]
+      routes:
+      - receiver: "null"
+        matchers: ['alertname =~ "Watchdog|InfoInhibitor"']
+      # Normal for busy Pis on USB disks; still visible in Grafana / Alertmanager
+      - receiver: "null"
+        matchers: ['alertname =~ "NodeDiskIOSaturation|NodeSystemSaturation|CPUThrottlingHigh"']
+      - receiver: "null"
+        matchers: ['severity !~ "critical|warning"']
+    receivers:
+    - name: "null"
+    - name: ntfy
+      webhook_configs:
+      - url_file: /etc/alertmanager/secrets/alertmanager-ntfy/url
+        send_resolved: true
   alertmanagerSpec:
+    secrets: [alertmanager-ntfy]
     resources:
       limits:
         cpu: 100m
@@ -12,8 +34,36 @@ grafana:
   ingress:
     enabled: true
     hosts:
-    - grafana.10.0.20.230.sslip.io
+    - grafana.lan.hinkel-net.com
     ingressClassName: traefik
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+      traefik.ingress.kubernetes.io/router.middlewares: traefik-redirect-https@kubernetescrd
+  # Sign in with Authentik (OIDC). The admin login still works as a fallback. Client secret: the
+  # grafana-oidc Secret (from the vault, same value as GRAFANA_OIDC_SECRET in authentik-secrets).
+  envValueFrom:
+    GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET:
+      secretKeyRef:
+        name: grafana-oidc
+        key: client-secret
+    # Read-only login to the portfolio visitor log (files/apps/visitor-log/), from the vault
+    VISITOR_LOG_DB_PASSWORD:
+      secretKeyRef:
+        name: visitor-log-grafana
+        key: password
+  # Portfolio visitor log, for the "Portfolio Visitors" dashboard (grafana-dashboard-visitors.yaml)
+  additionalDataSources:
+  - name: Portfolio visitors
+    uid: portfolio-visitors
+    type: grafana-postgresql-datasource
+    url: visitor-log-database-rw.visitor-log.svc:5432
+    user: grafana
+    jsonData:
+      database: visitorlog
+      sslmode: require
+      postgresVersion: 1500
+    secureJsonData:
+      password: ${VISITOR_LOG_DB_PASSWORD}
   # Keep dashboards, settings and imports across restarts (without this, Grafana starts empty)
   persistence:
     enabled: true
@@ -25,10 +75,48 @@ grafana:
   # A ReadWriteOnce volume can't be shared by an old and a new pod during an update
   deploymentStrategy:
     type: Recreate
+  # Show times in Central time (the chart's built-in dashboards default to UTC)
+  defaultDashboardsTimezone: America/Chicago
   grafana.ini:
+    server:
+      root_url: https://grafana.lan.hinkel-net.com
+    auth.generic_oauth:
+      enabled: true
+      name: Authentik
+      client_id: grafana
+      scopes: openid profile email
+      auth_url: https://auth.lan.hinkel-net.com/application/o/authorize/
+      token_url: https://auth.lan.hinkel-net.com/application/o/token/
+      api_url: https://auth.lan.hinkel-net.com/application/o/userinfo/
+      signout_redirect_url: https://auth.lan.hinkel-net.com/application/o/grafana/end-session/
+      use_pkce: true
+      # Members of Authentik's "authentik Admins" group are Grafana admins; everyone else can only view
+      role_attribute_path: contains(groups, 'authentik Admins') && 'Admin' || 'Viewer'
     dashboards:
       # From files/platform/grafana-dashboard-raspberry-pi.yaml (the sidecar writes it to /tmp/dashboards)
       default_home_dashboard_path: /tmp/dashboards/raspberry-pi-cluster.json
+    date_formats:
+      # For dashboards without their own time zone (e.g. ones you import later)
+      default_timezone: America/Chicago
+# The API server's SLO rules need the per-request latency histograms dropped below, and their
+# 30-day queries time out on the Pis anyway.
+defaultRules:
+  rules:
+    kubeApiserverAvailability: false
+    kubeApiserverBurnrate: false
+    kubeApiserverHistogram: false
+    kubeApiserverSlos: false
+# With 3 k3s servers these histograms were ~half of all series (and filled the disk). Nothing uses
+# them except K3sAPIServerLatencyHigh, which only needs the 1s and +Inf request-latency buckets.
+kubeApiServer:
+  serviceMonitor:
+    metricRelabelings:
+    - action: drop
+      sourceLabels: [__name__]
+      regex: (etcd_request_duration_seconds|apiserver_request_sli_duration_seconds|apiserver_request_slo_duration_seconds|apiserver_request_body_size_bytes|apiserver_watch_list_duration_seconds|apiserver_response_sizes)_bucket
+    - action: drop
+      sourceLabels: [__name__, le]
+      regex: apiserver_request_duration_seconds_bucket;(0\..*|[2-9].*|1[0-9].*|1\.[0-9]*[1-9].*)
 # k3s runs these inside the k3s binary; there is nothing separate to scrape
 kubeControllerManager:
   enabled: false
@@ -67,6 +155,9 @@ prometheus:
         cpu: 100m
         memory: 512Mi
     retention: 7d
+    # k3s's API server and etcd metrics are ~500k series; 10Gi filled up in under 7 days and
+    # Prometheus stopped saving data. The size cap drops the oldest data before the disk fills.
+    retentionSize: 25GB
     storageSpec:
       volumeClaimTemplate:
         spec:
@@ -74,4 +165,4 @@ prometheus:
           - ReadWriteOnce
           resources:
             requests:
-              storage: 10Gi
+              storage: 30Gi

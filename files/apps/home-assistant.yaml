@@ -1,6 +1,6 @@
 # Home Assistant + Z-Wave JS UI
-#   Home Assistant: https://ha.hinkel-net.com (Cloudflare tunnel) or http://ha.10.0.20.230.sslip.io (LAN)
-#   Z-Wave JS UI:   http://zwave.10.0.20.230.sslip.io (same login as the Longhorn dashboard)
+#   Home Assistant: https://ha.hinkel-net.com (Cloudflare tunnel) or https://ha.lan.hinkel-net.com (LAN)
+#   Z-Wave JS UI:   https://zwave.lan.hinkel-net.com (behind the Authentik login)
 # Z-Wave JS UI runs on node3, where the Nabu Casa ZWA-2 stick is plugged in.
 # Home Assistant connects to it at ws://zwave-js-ui.home-assistant:3000
 apiVersion: v1
@@ -201,7 +201,7 @@ spec:
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
-  name: zwave-auth
+  name: zwave-auth   # old password login; fallback if Authentik is down (see the zwave-js-ui Ingress)
   namespace: home-assistant
 spec:
   basicAuth:
@@ -217,7 +217,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: ha.10.0.20.230.sslip.io
+    - host: ha.hinkel-net.com
       http:
         paths:
           - path: /
@@ -227,7 +227,20 @@ spec:
                 name: home-assistant
                 port:
                   name: http
-    - host: ha.hinkel-net.com
+---
+# Home network name (the tunnel name above is plain http, so it can't share the https redirect)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: home-assistant-lan
+  namespace: home-assistant
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.middlewares: traefik-redirect-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: ha.lan.hinkel-net.com
       http:
         paths:
           - path: /
@@ -245,11 +258,12 @@ metadata:
   namespace: home-assistant
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
-    traefik.ingress.kubernetes.io/router.middlewares: home-assistant-zwave-auth@kubernetescrd
+    # Fallback if Authentik is down: traefik-redirect-https@kubernetescrd,home-assistant-zwave-auth@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: traefik-redirect-https@kubernetescrd,authentik-authentik@kubernetescrd
 spec:
   ingressClassName: traefik
   rules:
-    - host: zwave.10.0.20.230.sslip.io
+    - host: zwave.lan.hinkel-net.com
       http:
         paths:
           - path: /

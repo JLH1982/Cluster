@@ -62,6 +62,22 @@
     - ansible.builtin.include_tasks: tasks/helm-release.yml
       vars: {release: cert-manager, ns: cert-manager, chart: jetstack/cert-manager, version: v1.21.2, values: helm-values/cert-manager.yaml}
 
+    # Cloudflare API token that can only edit DNS in hinkel-net.com (for the DNS-01 check)
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: cloudflare-api-token
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: cloudflare-api-token, namespace: cert-manager}
+          stringData: {api-token: "{{ vault_cloudflare_dns_token }}"}
+
+    # Let's Encrypt issuer, *.lan.hinkel-net.com certificate (Traefik's default) and https redirect
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: platform/lan-certificate.yaml}
+
     # ---- Storage ----
     - name: Mark which nodes get a Longhorn disk
       ansible.builtin.shell: |
@@ -100,11 +116,68 @@
       vars: {src: platform/longhorn-ingress.yaml}
 
     # ---- Monitoring ----
+    - name: Monitoring namespace (the alert secret below is created before the Helm release)
+      ansible.builtin.shell: kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+      register: mon_ns
+      changed_when: "'created' in mon_ns.stdout"
+
+    # Where Alertmanager sends alerts (ntfy topic URL; mounted into Alertmanager, see prometheus.yaml)
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: alertmanager-ntfy
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: alertmanager-ntfy, namespace: monitoring}
+          stringData: "{{ vault_alertmanager_ntfy }}"
+
+    # Grafana's client secret for signing in through Authentik (same value as in authentik-secrets)
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: grafana-oidc
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: grafana-oidc, namespace: monitoring}
+          stringData: {client-secret: "{{ vault_authentik_secrets.GRAFANA_OIDC_SECRET }}"}
+
+    # Grafana's read-only login to the portfolio visitor log (same value as visitor-log-grafana
+    # in the visitor-log namespace, see 04-apps.yml)
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: visitor-log-grafana
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: visitor-log-grafana, namespace: monitoring}
+          stringData: {password: "{{ vault_visitor_log_grafana_db_password }}"}
+
+    # Helm only sets the size of a new Prometheus volume; grow an existing one to match (Longhorn
+    # resizes it online). Volumes can't shrink, so a smaller value here fails instead of applying.
+    # Runs before the upgrade so a full disk is fixed before Prometheus restarts.
+    - name: Grow the Prometheus volume to the size in the Helm values
+      ansible.builtin.shell: |
+        pvc=prometheus-prometheus-kube-prometheus-prometheus-db-prometheus-prometheus-kube-prometheus-prometheus-0
+        have=$(kubectl -n monitoring get pvc "$pvc" -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null) || exit 0
+        [ "$have" = "$WANT" ] && exit 0
+        kubectl -n monitoring patch pvc "$pvc" -p "{\"spec\":{\"resources\":{\"requests\":{\"storage\":\"$WANT\"}}}}"
+        echo changed
+      environment:
+        WANT: "{{ (lookup('file', '../files/helm-values/prometheus.yaml') | from_yaml).prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage }}"
+      register: prom_pvc
+      changed_when: "'changed' in prom_pvc.stdout"
+
     - ansible.builtin.include_tasks: tasks/helm-release.yml
       vars: {release: prometheus, ns: monitoring, chart: prometheus-community/kube-prometheus-stack, version: 92.9.0, values: helm-values/prometheus.yaml, wait_timeout: 15m}
 
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
-      loop: [platform/k3s-alerts.yaml, platform/local-path-alerts.yaml, platform/traefik-servicemonitor.yaml, platform/grafana-dashboard-raspberry-pi.yaml, platform/grafana-dashboards-unifi.yaml]
+      loop: [platform/k3s-alerts.yaml, platform/local-path-alerts.yaml, platform/traefik-servicemonitor.yaml, platform/grafana-dashboard-raspberry-pi.yaml, platform/grafana-dashboards-unifi.yaml, platform/grafana-dashboard-visitors.yaml]
       loop_control: {loop_var: src}
 
     # ---- Databases ----

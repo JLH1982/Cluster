@@ -3,6 +3,10 @@
 timezone: America/Chicago
 
 lan_cidr: 10.0.20.0/24
+# Networks allowed to SSH to the Pis: the LAN and UniFi Teleport VPN clients.
+ssh_allowed_cidrs: ["{{ lan_cidr }}", 192.168.2.0/24]
+# fail2ban never bans these (fixed IPs in UniFi): phone, laptop (Wi-Fi), tablet.
+fail2ban_ignore_ips: [10.0.20.7, 10.0.20.8, 10.0.20.9]
 pod_cidr: 10.42.0.0/16
 service_cidr: 10.43.0.0/16
 metallb_range: 10.0.20.230-10.0.20.239
@@ -31,9 +35,11 @@ helm_repos:
   longhorn: https://charts.longhorn.io
   prometheus-community: https://prometheus-community.github.io/helm-charts
   cnpg: https://cloudnative-pg.github.io/charts
+  authentik: https://charts.goauthentik.io
 
 # ---- Apps (playbooks/04-apps.yml) ----
 immich_chart_version: 0.13.4
+authentik_chart_version: 2026.8.5
 # Minimum cloudflared version. The daily cloudflared-auto-update timer moves the cluster past
 # this; the playbook never downgrades a newer running version.
 cloudflared_version: 2026.10.3
@@ -49,3 +55,7 @@ darkweb_service_ip: 10.43.35.70
 backup_dir_remote: /home/kube/backups
 backup_keep_remote: 5
 backup_dir_local: "{{ playbook_dir }}/../backups"
+# Off-site copy of this folder + each new backup (encrypted with the vault password) - see backup.yml.
+# The AWS CLI profile can only upload to this bucket. Set offsite_bucket to "" to skip.
+offsite_bucket: <your-cluster-backup-bucket>
+offsite_aws_profile: cluster-backup

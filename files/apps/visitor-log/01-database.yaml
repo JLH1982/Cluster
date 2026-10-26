@@ -1,0 +1,43 @@
+# Portfolio visitor log: who looked at https://portfolio.hinkel-net.com (see 02-logger.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: visitor-log
+---
+# Postgres for the visitor log via CloudNativePG. One instance on a Longhorn (replicated) volume:
+# the data is small and losing a few minutes of it during a node failure doesn't matter.
+# Passwords (visitor-log-db for the logger, visitor-log-grafana for Grafana's read-only login) are
+# created separately from the vault and not stored in this file.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: visitor-log-database
+  namespace: visitor-log
+spec:
+  instances: 1
+
+  storage:
+    size: 1Gi
+    storageClass: longhorn
+
+  resources:
+    requests: {cpu: 20m, memory: 96Mi}
+    limits: {memory: 256Mi}
+
+  bootstrap:
+    initdb:
+      database: visitorlog
+      owner: visitorlog
+      secret:
+        name: visitor-log-db
+
+  # Grafana's login. The logger grants it SELECT on the visits table.
+  managed:
+    roles:
+      - name: grafana
+        ensure: present
+        login: true
+        passwordSecret:
+          name: visitor-log-grafana
+
+  primaryUpdateStrategy: unsupervised

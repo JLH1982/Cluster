@@ -1,0 +1,284 @@
+# Records each page view of https://portfolio.hinkel-net.com: IP (kept 7 days), city, country,
+# reverse-DNS domain and the IP block's owner (RDAP), so you can see e.g. a company's network.
+# nginx in the website pod sends a copy of every page request here (files/apps/website.yaml).
+# Shown in Grafana by files/platform/grafana-dashboard-visitors.yaml.
+# No custom image: the script below runs on python:slim, with psycopg installed at pod start.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: visitor-log-script
+  namespace: visitor-log
+data:
+  logger.py: |
+    #!/usr/bin/env python3
+    # Records portfolio page views in Postgres. nginx in the website pod mirrors each page request
+    # here (files/apps/website.yaml); Cloudflare adds the visitor's IP (CF-Connecting-IP) and
+    # location headers. Answers at once and does the lookups in the background.
+    # After KEEP_IP_DAYS the IP and reverse-DNS name are cleared; city, country, domain and org stay.
+    import ipaddress, json, os, queue, re, socket, threading, time, urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import psycopg
+
+    KEEP_IP_DAYS = int(os.environ.get("KEEP_IP_DAYS", "7"))
+    BOTS = re.compile(r"bot|crawl|spider|slurp|preview|monitor|uptime|curl|wget|python|go-http|java/|"
+                      r"okhttp|headless|scan|fetch|http-client|axios|node", re.I)
+    # Second-level labels under country TLDs (example.co.uk -> example.co.uk, not co.uk)
+    SECOND_LEVEL = {"co", "com", "net", "org", "gov", "edu", "ac", "ne", "or", "go", "gob", "nic"}
+
+    SCHEMA = """
+    CREATE TABLE IF NOT EXISTS visits (
+      id         bigserial PRIMARY KEY,
+      ts         timestamptz NOT NULL DEFAULT now(),
+      ip         inet,     -- cleared after KEEP_IP_DAYS
+      hostname   text,     -- reverse DNS; cleared with the IP (it often contains the IP)
+      domain     text,     -- registered domain of hostname, e.g. example.com
+      org        text,     -- owner of the IP block (RDAP): a company, university or ISP
+      city       text,
+      region     text,
+      country    text,     -- ISO code from Cloudflare
+      lat        double precision,
+      lon        double precision,
+      path       text,
+      referer    text,
+      user_agent text,
+      bot        boolean NOT NULL DEFAULT false
+    );
+    CREATE INDEX IF NOT EXISTS visits_ts ON visits (ts);
+    """
+    INSERT = """INSERT INTO visits (ip, hostname, domain, org, city, region, country, lat, lon, path, referer, user_agent, bot)
+    VALUES (%(ip)s, %(hostname)s, %(domain)s, %(org)s, %(city)s, %(region)s, %(country)s, %(lat)s, %(lon)s,
+            %(path)s, %(referer)s, %(user_agent)s, %(bot)s)"""
+    FORGET = """UPDATE visits SET ip = NULL, hostname = NULL
+    WHERE (ip IS NOT NULL OR hostname IS NOT NULL) AND ts < now() - make_interval(days => %s)"""
+
+    jobs = queue.Queue(maxsize=1000)
+    cache = {}  # ip -> (time, hostname, domain, org)
+
+
+    def log(*a):
+        print(time.strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
+
+
+    def connect():
+        # Host, user, password and database come from the PG* environment variables
+        while True:
+            try:
+                return psycopg.connect(autocommit=True, connect_timeout=10)
+            except psycopg.Error as e:
+                log("database not reachable:", e)
+                time.sleep(10)
+
+
+    def registered_domain(host):
+        labels = host.rstrip(".").lower().split(".")
+        if len(labels) < 2:
+            return None
+        n = 3 if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in SECOND_LEVEL else 2
+        return ".".join(labels[-n:])
+
+
+    def network_owner(ip):
+        # RDAP (the registries' whois): the registrant of the IP block, else the block's name
+        req = urllib.request.Request(f"https://rdap.org/ip/{ip}", headers={"Accept": "application/rdap+json"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                d = json.load(r)
+        except Exception as e:
+            log("RDAP lookup failed:", e)
+            return None
+        for role in ("registrant", "administrative"):
+            for ent in d.get("entities", []):
+                if role in ent.get("roles", []):
+                    for item in (ent.get("vcardArray") or [None, []])[1]:
+                        if item[0] == "fn" and item[3]:
+                            return str(item[3])[:200]
+        return (d.get("name") or None) and str(d["name"])[:200]
+
+
+    def lookup(ip):
+        hit = cache.get(ip)
+        if hit and time.time() - hit[0] < 86400:
+            return hit[1:]
+        try:
+            hostname = socket.gethostbyaddr(ip)[0]
+        except OSError:
+            hostname = None
+        result = (hostname, hostname and registered_domain(hostname), network_owner(ip))
+        if len(cache) > 5000:
+            cache.clear()
+        cache[ip] = (time.time(),) + result
+        return result
+
+
+    def number(s):
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+
+
+    def utf8(s, limit=500):
+        # http.server decodes headers as Latin-1; Cloudflare sends city names as UTF-8
+        if s is None:
+            return None
+        try:
+            s = s.encode("latin-1").decode("utf-8")
+        except UnicodeError:
+            pass
+        return s[:limit] or None
+
+
+    def writer():
+        conn = connect()
+        while True:
+            v = jobs.get()
+            v["hostname"], v["domain"], v["org"] = lookup(v["ip"])
+            for _ in range(3):
+                try:
+                    conn.execute(INSERT, v)
+                    break
+                except psycopg.Error as e:
+                    log("insert failed, reconnecting:", e)
+                    conn.close()
+                    time.sleep(5)
+                    conn = connect()
+
+
+    def forgetter():
+        conn = connect()
+        while True:
+            try:
+                # Repeated hourly: the grafana role (from 01-database.yaml) may appear after the logger starts
+                conn.execute("GRANT SELECT ON visits TO grafana")
+            except psycopg.Error as e:
+                log("could not give Grafana read access (role missing?):", e)
+            try:
+                n = conn.execute(FORGET, (KEEP_IP_DAYS,)).rowcount
+                if n:
+                    log(f"cleared the IP of {n} visits older than {KEEP_IP_DAYS} days")
+            except psycopg.Error as e:
+                log("clearing old IPs failed:", e)
+                conn.close()
+                conn = connect()
+            time.sleep(3600)
+
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            h = self.headers
+            try:
+                ip = ipaddress.ip_address((h.get("CF-Connecting-IP") or "").strip())
+            except ValueError:
+                ip = None  # not through Cloudflare (LAN, health check): nothing to record
+            if ip and ip.is_global:
+                ua = utf8(h.get("User-Agent"))
+                try:
+                    jobs.put_nowait({
+                        "ip": str(ip),
+                        "city": utf8(h.get("CF-IPCity"), 100),
+                        "region": utf8(h.get("CF-Region"), 100),
+                        "country": utf8(h.get("CF-IPCountry"), 10),
+                        "lat": number(h.get("CF-IPLatitude")),
+                        "lon": number(h.get("CF-IPLongitude")),
+                        "path": utf8(h.get("X-Original-URI"), 1000),
+                        "referer": utf8(h.get("Referer"), 1000),
+                        "user_agent": ua,
+                        "bot": not ua or bool(BOTS.search(ua)),
+                    })
+                except queue.Full:
+                    log("queue full, visit dropped")
+            self.send_response(204)
+            self.end_headers()
+
+        do_HEAD = do_POST = do_GET
+
+        def log_message(self, *args):
+            pass
+
+
+    def main():
+        conn = connect()
+        conn.execute(SCHEMA)
+        conn.close()
+        threading.Thread(target=writer, daemon=True).start()
+        threading.Thread(target=forgetter, daemon=True).start()
+        log(f"listening on :8080, keeping IPs for {KEEP_IP_DAYS} days")
+        ThreadingHTTPServer(("", 8080), Handler).serve_forever()
+
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: visitor-log
+  namespace: visitor-log
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: visitor-log
+  template:
+    metadata:
+      labels:
+        app: visitor-log
+      annotations:
+        # Bump to restart the pod after changing the script
+        visitor-log/script-version: "1"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      initContainers:
+        - name: install
+          image: docker.io/library/python:3.13-slim
+          command: ["pip", "install", "--no-cache-dir", "--disable-pip-version-check", "--target", "/deps", "psycopg[binary]==3.2.9"]
+          env:
+            - {name: HOME, value: /tmp}
+          volumeMounts:
+            - {name: deps, mountPath: /deps}
+      containers:
+        - name: logger
+          image: docker.io/library/python:3.13-slim
+          command: ["python3", "-u", "/app/logger.py"]
+          env:
+            - {name: PYTHONPATH, value: /deps}
+            - {name: KEEP_IP_DAYS, value: "7"}
+            - {name: PGHOST, value: visitor-log-database-rw}
+            - {name: PGDATABASE, value: visitorlog}
+            - {name: PGSSLMODE, value: require}
+            - name: PGUSER
+              valueFrom: {secretKeyRef: {name: visitor-log-db, key: username}}
+            - name: PGPASSWORD
+              valueFrom: {secretKeyRef: {name: visitor-log-db, key: password}}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: {port: 8080}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          volumeMounts:
+            - {name: script, mountPath: /app}
+            - {name: deps, mountPath: /deps}
+      volumes:
+        - name: script
+          configMap: {name: visitor-log-script}
+        - name: deps
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: visitor-log
+  namespace: visitor-log
+spec:
+  selector:
+    app: visitor-log
+  ports:
+    - port: 8080
+      targetPort: 8080

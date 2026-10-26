@@ -1977,8 +1977,8 @@ data:
                 "mode": "continuous-GrYlRd"
               },
               "mappings": [],
-              "max": 100,
-              "min": 1,
+              "max": 212,
+              "min": 32,
               "thresholds": {
                 "mode": "absolute",
                 "steps": [
@@ -1988,11 +1988,11 @@ data:
                   },
                   {
                     "color": "dark-orange",
-                    "value": 75
+                    "value": 167
                   }
                 ]
               },
-              "unit": "celsius"
+              "unit": "fahrenheit"
             },
             "overrides": []
           },
@@ -2036,7 +2036,7 @@ data:
               },
               "editorMode": "code",
               "exemplar": false,
-              "expr": "max by (instance) (\n  node_hwmon_temp_celsius{\n    chip=\"thermal_thermal_zone0\",\n    instance=~\"$node\",job=~\"$job\"\n  }\n)",
+              "expr": "max by (instance) (\n  node_hwmon_temp_celsius{\n    chip=\"thermal_thermal_zone0\",\n    instance=~\"$node\",job=~\"$job\"\n  }\n) * 9 / 5 + 32",
               "format": "time_series",
               "instant": false,
               "legendFormat": "__auto",
@@ -2044,7 +2044,7 @@ data:
               "refId": "A"
             }
           ],
-          "title": "CPU Temperature (\u00b0C)",
+          "title": "CPU Temperature (\u00b0F)",
           "type": "bargauge"
         },
         {

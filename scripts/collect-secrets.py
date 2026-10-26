@@ -24,5 +24,12 @@ out = {
     "vault_zwave_settings_json": open("/home/kube/zwave-settings.json").read(),
     "vault_uptime_kuma_metrics": secret("uptime-kuma", "uptime-kuma-metrics"),
     "vault_unpoller_unifi": secret("unpoller", "unpoller-unifi"),
+    "vault_immich_s3_backup": secret("immich", "immich-s3-backup"),
+    "vault_alertmanager_ntfy": secret("monitoring", "alertmanager-ntfy"),
+    "vault_cloudflare_dns_token": secret("cert-manager", "cloudflare-api-token")["api-token"],
+    "vault_authentik_db_password": secret("authentik", "authentik-postgres-secret")["password"],
+    "vault_authentik_secrets": secret("authentik", "authentik-secrets"),
+    "vault_visitor_log_db_password": secret("visitor-log", "visitor-log-db")["password"],
+    "vault_visitor_log_grafana_db_password": secret("visitor-log", "visitor-log-grafana")["password"],
 }
 print(yaml.safe_dump(out, sort_keys=False, width=1000))
