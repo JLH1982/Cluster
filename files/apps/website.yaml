@@ -13,8 +13,9 @@ spec:
     requests:
       storage: 55Mi
 ---
-# nginx:alpine's default site, plus a copy of each page request (not images, CSS or scripts) sent
-# to the visitor log. The logger answers at once; if it is down, nginx still serves the site.
+# nginx:alpine's default site, plus a copy of each page view and probe (not images, CSS or
+# scripts) sent to the visitor log. The logger answers at once; if it is down, nginx still serves
+# the site.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -22,13 +23,17 @@ metadata:
   namespace: default
 data:
   default.conf: |
-    # Pages: folders (/, /projects/), .html and .pdf files (e.g. a resume download) and paths
-    # without a file extension (/about)
-    map $request_uri $visitor_page {
-        default                        0;
-        "~^[^?]*/(\?|$)"               1;
-        "~^[^?]*\.(html?|pdf)(\?|$)"   1;
-        "~^[^?]*/[^/.?]+(\?|$)"        1;
+    # What the visitor log records (the first matching line wins):
+    # probe: things a static portfolio never has - scripts, config/backup files, dotfiles, admin
+    #        panels (/.env, /wp-login.php, /phpmyadmin/, /admin)
+    # page:  folders (/, /projects/), .html and .pdf files (e.g. a resume download) and paths
+    #        without a file extension (/about)
+    map $request_uri $visitor_kind {
+        default "";
+        "~*^[^?]*(\.(php[0-9]?|aspx?|jsp|cgi|pl|env|ini|cfg|conf|bak|old|sql|gz|zip|tar|rar|7z|log|ya?ml|sh|git|svn|ds_store)|/\.(?!well-known)[^/?]+|/wp-[^/?]*|/(wordpress|phpmyadmin|pma|cgi-bin|admin|administrator|login|xmlrpc|vendor|actuator|boaform|hnap1|owa|ecp|autodiscover|remote|api|console|manager|solr|jenkins|telescope|debug|server-status|config|backup|shell|setup|install))([/?]|$)" probe;
+        "~^[^?]*/(\?|$)"               page;
+        "~^[^?]*\.(html?|pdf)(\?|$)"   page;
+        "~^[^?]*/[^/.?]+(\?|$)"        page;
     }
 
     server {
@@ -44,15 +49,17 @@ data:
 
         location = /_visitor_log {
             internal;
-            if ($visitor_page = 0) { return 204; }
-            if ($request_method != GET) { return 204; }
+            if ($visitor_kind = "") { return 204; }
             # Looked up per request (k3s DNS), so nginx starts even when the logger doesn't exist
             resolver 10.43.0.10 valid=60s ipv6=off;
             set $visitor_log http://visitor-log.visitor-log.svc.cluster.local:8080;
             proxy_pass $visitor_log;
+            proxy_method GET;
             proxy_pass_request_body off;
             proxy_set_header Content-Length "";
             proxy_set_header X-Original-URI $request_uri;
+            proxy_set_header X-Original-Method $request_method;
+            proxy_set_header X-Visit-Kind $visitor_kind;
             proxy_connect_timeout 1s;
             proxy_read_timeout 2s;
         }
@@ -83,7 +90,7 @@ spec:
         app: website
       annotations:
         # Bump to restart nginx after changing website-nginx
-        website/nginx-config-version: "1"
+        website/nginx-config-version: "2"
     spec:
       containers:
         - name: nginx

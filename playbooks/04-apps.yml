@@ -99,7 +99,7 @@
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars: {src: apps/website.yaml}
 
-    # Portfolio visitor log (shown in Grafana's "Portfolio Visitors" dashboard)
+    # Portfolio visitor log + admin.hinkel-net.com honeypot (Grafana's "Visitors & Honeypot" dashboard)
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars: {src: apps/visitor-log/01-database.yaml}
 
@@ -117,6 +117,19 @@
         - {name: visitor-log-db, user: visitorlog, password: "{{ vault_visitor_log_db_password }}"}
         - {name: visitor-log-grafana, user: grafana, password: "{{ vault_visitor_log_grafana_db_password }}"}
       loop_control: {label: "{{ item.name }}"}
+
+    # Optional Cloudflare token (Analytics Read) for the requests Cloudflare answered itself
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: visitor-log-cloudflare
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: visitor-log-cloudflare, namespace: visitor-log}
+          stringData: "{{ vault_visitor_log_cloudflare }}"
+      when: vault_visitor_log_cloudflare is defined
 
     - name: Wait for the visitor log database
       ansible.builtin.command: >-

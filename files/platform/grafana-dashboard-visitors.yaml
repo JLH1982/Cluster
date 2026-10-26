@@ -1,7 +1,8 @@
-# Grafana dashboard "Portfolio Visitors": a world map of who opened the portfolio site, and tables
-# of the networks (companies, ISPs) the visits came from. Data: the visitor log
-# (files/apps/visitor-log/) through the "Portfolio visitors" datasource (helm-values/prometheus.yaml).
-# Loaded by the Grafana dashboard sidecar (label grafana_dashboard=1).
+# Grafana dashboard "Visitors & Honeypot": a world map and tables of who opened the portfolio and
+# www, what scanners probe for, and the admin.hinkel-net.com honeypot - switched with the Source
+# dropdown. Data: the visitor log (files/apps/visitor-log/) through the "Portfolio visitors"
+# datasource (helm-values/prometheus.yaml). Loaded by the Grafana dashboard sidecar (label
+# grafana_dashboard=1).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,15 +14,16 @@ data:
   portfolio-visitors.json: |
     {
       "uid": "portfolio-visitors",
-      "title": "Portfolio Visitors",
+      "title": "Visitors & Honeypot",
       "tags": [
-        "portfolio"
+        "portfolio",
+        "honeypot"
       ],
-      "description": "Who opened https://portfolio.hinkel-net.com, from the visitor log (files/apps/visitor-log/).",
+      "description": "Who opened portfolio.hinkel-net.com and www, what scanners probe for, and the admin.hinkel-net.com honeypot (visitor log: files/apps/visitor-log/).",
       "timezone": "America/Chicago",
       "editable": true,
       "schemaVersion": 39,
-      "version": 1,
+      "version": 2,
       "time": {
         "from": "now-30d",
         "to": "now"
@@ -35,8 +37,57 @@ data:
       "templating": {
         "list": [
           {
+            "name": "source",
+            "label": "Source",
+            "type": "custom",
+            "query": "Portfolio visitors : portfolio,Portfolio probes : probes,Honeypot (admin) : honeypot,www login page : www,Blocked by Cloudflare : blocked",
+            "multi": true,
+            "includeAll": true,
+            "hide": 0,
+            "current": {
+              "text": [
+                "Portfolio visitors"
+              ],
+              "value": [
+                "portfolio"
+              ]
+            },
+            "options": [
+              {
+                "text": "All",
+                "value": "$__all",
+                "selected": false
+              },
+              {
+                "text": "Portfolio visitors",
+                "value": "portfolio",
+                "selected": true
+              },
+              {
+                "text": "Portfolio probes",
+                "value": "probes",
+                "selected": false
+              },
+              {
+                "text": "Honeypot (admin)",
+                "value": "honeypot",
+                "selected": false
+              },
+              {
+                "text": "www login page",
+                "value": "www",
+                "selected": false
+              },
+              {
+                "text": "Blocked by Cloudflare",
+                "value": "blocked",
+                "selected": false
+              }
+            ]
+          },
+          {
             "name": "search",
-            "label": "Search (company, domain, city)",
+            "label": "Search (company, domain, city, path)",
             "type": "textbox",
             "query": "",
             "current": {
@@ -47,7 +98,7 @@ data:
           },
           {
             "name": "bots",
-            "label": "Bots and monitors",
+            "label": "Bots on the portfolio",
             "type": "custom",
             "query": "Hide : false,Show : true",
             "current": {
@@ -76,8 +127,8 @@ data:
         {
           "id": 1,
           "type": "stat",
-          "title": "Page views",
-          "description": "Pages opened (and PDFs downloaded) in the time range.",
+          "title": "Requests",
+          "description": "Page views, probes and honeypot requests in the time range (Cloudflare's numbers are estimates from samples).",
           "datasource": {
             "type": "grafana-postgresql-datasource",
             "uid": "portfolio-visitors"
@@ -98,7 +149,7 @@ data:
               "format": "table",
               "rawQuery": true,
               "editorMode": "code",
-              "rawSql": "SELECT count(*) AS views FROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'"
+              "rawSql": "SELECT coalesce(sum(hits), 0) AS requests FROM visit_sources WHERE $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'"
             }
           ],
           "fieldConfig": {
@@ -128,8 +179,8 @@ data:
         {
           "id": 2,
           "type": "stat",
-          "title": "Organisations",
-          "description": "Different networks the visits came from (IP-block owner, else reverse-DNS domain).",
+          "title": "IP addresses",
+          "description": "Different IPs. Visitor IPs are deleted after 7 days and attacker IPs after 90, so older requests don't count here.",
           "datasource": {
             "type": "grafana-postgresql-datasource",
             "uid": "portfolio-visitors"
@@ -150,7 +201,7 @@ data:
               "format": "table",
               "rawQuery": true,
               "editorMode": "code",
-              "rawSql": "SELECT count(DISTINCT coalesce(org, domain)) AS orgs FROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'"
+              "rawSql": "SELECT count(DISTINCT ip) AS ips FROM visit_sources WHERE $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'"
             }
           ],
           "fieldConfig": {
@@ -180,8 +231,8 @@ data:
         {
           "id": 3,
           "type": "stat",
-          "title": "Places",
-          "description": "Different cities.",
+          "title": "Organisations",
+          "description": "Different networks (IP-block owner or Cloudflare's network name, else reverse-DNS domain).",
           "datasource": {
             "type": "grafana-postgresql-datasource",
             "uid": "portfolio-visitors"
@@ -202,7 +253,7 @@ data:
               "format": "table",
               "rawQuery": true,
               "editorMode": "code",
-              "rawSql": "SELECT count(DISTINCT (city, country)) AS places FROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'"
+              "rawSql": "SELECT count(DISTINCT coalesce(org, domain)) AS orgs FROM visit_sources WHERE $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'"
             }
           ],
           "fieldConfig": {
@@ -232,8 +283,8 @@ data:
         {
           "id": 4,
           "type": "stat",
-          "title": "Last visit",
-          "description": "Most recent page view.",
+          "title": "Last seen",
+          "description": "Most recent request.",
           "datasource": {
             "type": "grafana-postgresql-datasource",
             "uid": "portfolio-visitors"
@@ -254,7 +305,7 @@ data:
               "format": "table",
               "rawQuery": true,
               "editorMode": "code",
-              "rawSql": "SELECT max(ts) AS last FROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'"
+              "rawSql": "SELECT max(ts) AS last FROM visit_sources WHERE $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'"
             }
           ],
           "fieldConfig": {
@@ -284,12 +335,12 @@ data:
         {
           "id": 5,
           "type": "geomap",
-          "title": "Where visitors are",
+          "title": "Where requests come from",
           "datasource": {
             "type": "grafana-postgresql-datasource",
             "uid": "portfolio-visitors"
           },
-          "description": "One dot per city; bigger dots had more page views, and the number shows when there was more than one.",
+          "description": "Blue: one dot per city (requests that reached the cluster: portfolio and honeypot). Orange: one dot per country (requests Cloudflare answered itself: the www login page and blocked bots; Cloudflare gives no city for those). Bigger dots had more requests; the number shows when more than one.",
           "gridPos": {
             "h": 15,
             "w": 24,
@@ -306,7 +357,18 @@ data:
               "format": "table",
               "rawQuery": true,
               "editorMode": "code",
-              "rawSql": "SELECT city, region, country, lat AS latitude, lon AS longitude, count(*) AS visits,\n  CASE WHEN count(*) > 1 THEN count(*)::text ELSE '' END AS label\nFROM visits WHERE lat IS NOT NULL AND $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY city, region, country, lat, lon"
+              "rawSql": "SELECT city, region, country, lat AS latitude, lon AS longitude, sum(hits) AS requests,\n  string_agg(DISTINCT source, ', ') AS sources, CASE WHEN sum(hits) > 1 THEN sum(hits)::text ELSE '' END AS label\nFROM visit_sources WHERE kind <> 'edge' AND lat IS NOT NULL AND $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY city, region, country, lat, lon"
+            },
+            {
+              "refId": "B",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT country, sum(hits) AS requests, string_agg(DISTINCT source, ', ') AS sources, CASE WHEN sum(hits) > 1 THEN sum(hits)::text ELSE '' END AS label\nFROM visit_sources WHERE kind = 'edge' AND country IS NOT NULL AND $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY country"
             }
           ],
           "fieldConfig": {
@@ -342,12 +404,95 @@ data:
             "layers": [
               {
                 "type": "markers",
-                "name": "Visitors",
+                "name": "Countries (Cloudflare)",
+                "tooltip": true,
+                "location": {
+                  "mode": "lookup",
+                  "lookup": "country",
+                  "gazetteer": "public/gazetteer/countries.json"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "B"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": "img/icons/marker/circle.svg"
+                    },
+                    "symbolAlign": {
+                      "horizontal": "center",
+                      "vertical": "center"
+                    },
+                    "color": {
+                      "fixed": "orange"
+                    },
+                    "opacity": 0.85,
+                    "size": {
+                      "field": "requests",
+                      "fixed": 9,
+                      "min": 9,
+                      "max": 24
+                    }
+                  }
+                }
+              },
+              {
+                "type": "markers",
+                "name": "Country counts",
+                "tooltip": false,
+                "location": {
+                  "mode": "lookup",
+                  "lookup": "country",
+                  "gazetteer": "public/gazetteer/countries.json"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "B"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": ""
+                    },
+                    "color": {
+                      "fixed": "white"
+                    },
+                    "opacity": 1,
+                    "size": {
+                      "fixed": 9
+                    },
+                    "text": {
+                      "mode": "field",
+                      "field": "label",
+                      "fixed": ""
+                    },
+                    "textConfig": {
+                      "fontSize": 11,
+                      "textAlign": "center",
+                      "textBaseline": "middle",
+                      "offsetX": 0,
+                      "offsetY": 0
+                    }
+                  }
+                }
+              },
+              {
+                "type": "markers",
+                "name": "Cities",
                 "tooltip": true,
                 "location": {
                   "mode": "coords",
                   "latitude": "latitude",
                   "longitude": "longitude"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "A"
                 },
                 "config": {
                   "showLegend": false,
@@ -365,7 +510,7 @@ data:
                     },
                     "opacity": 0.85,
                     "size": {
-                      "field": "visits",
+                      "field": "requests",
                       "fixed": 9,
                       "min": 9,
                       "max": 24
@@ -375,12 +520,16 @@ data:
               },
               {
                 "type": "markers",
-                "name": "Counts",
+                "name": "City counts",
                 "tooltip": false,
                 "location": {
                   "mode": "coords",
                   "latitude": "latitude",
                   "longitude": "longitude"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "A"
                 },
                 "config": {
                   "showLegend": false,
@@ -417,12 +566,12 @@ data:
         {
           "id": 6,
           "type": "table",
-          "title": "Who visited",
+          "title": "Who",
+          "description": "Grouped by network owner. A company on its own network shows up by name in Organisation or Domain; a home or mobile connection shows the ISP (Comcast, Verizon...).",
           "datasource": {
             "type": "grafana-postgresql-datasource",
             "uid": "portfolio-visitors"
           },
-          "description": "Grouped by network owner. A company on its own network shows up by name in Organisation or Domain; a home or mobile connection shows the ISP (Comcast, Verizon...).",
           "gridPos": {
             "h": 11,
             "w": 24,
@@ -439,7 +588,7 @@ data:
               "format": "table",
               "rawQuery": true,
               "editorMode": "code",
-              "rawSql": "SELECT org AS \"Organisation\", domain AS \"Domain\", city AS \"City\", region AS \"Region\", country AS \"Country\",\n  count(*) AS \"Views\", string_agg(DISTINCT path, ' ') AS \"Pages\", min(ts) AS \"First\", max(ts) AS \"Last\"\nFROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY org, domain, city, region, country\nORDER BY max(ts) DESC"
+              "rawSql": "SELECT org AS \"Organisation\", domain AS \"Domain\", city AS \"City\", region AS \"Region\", country AS \"Country\",\n  string_agg(DISTINCT source, ', ') AS \"Source\", sum(hits) AS \"Requests\",\n  left(string_agg(DISTINCT path, ' '), 300) AS \"Paths\", min(ts) AS \"First\", max(ts) AS \"Last\"\nFROM visit_sources WHERE $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY org, domain, city, region, country\nORDER BY max(ts) DESC LIMIT 500"
             }
           ],
           "fieldConfig": {
@@ -452,7 +601,61 @@ data:
               {
                 "matcher": {
                   "id": "byName",
-                  "options": "Pages"
+                  "options": "Paths"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 300
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm"
+          }
+        },
+        {
+          "id": 7,
+          "type": "table",
+          "title": "Most requested paths",
+          "description": "What visitors opened, and what scanners looked for.",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "portfolio-visitors"
+          },
+          "gridPos": {
+            "h": 11,
+            "w": 12,
+            "x": 0,
+            "y": 30
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT path AS \"Path\", string_agg(DISTINCT source, ', ') AS \"Source\", sum(hits) AS \"Requests\",\n  count(DISTINCT ip) AS \"IPs\", max(ts) AS \"Last\"\nFROM visit_sources WHERE $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY path ORDER BY sum(hits) DESC LIMIT 200"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "filterable": true
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Path"
                 },
                 "properties": [
                   {
@@ -469,17 +672,18 @@ data:
           }
         },
         {
-          "id": 7,
+          "id": 8,
           "type": "table",
-          "title": "Recent visits (IP addresses are kept 7 days)",
+          "title": "Honeypot: logins tried",
+          "description": "Usernames and passwords typed into the fake admin login at admin.hinkel-net.com (shown whatever Source is picked).",
           "datasource": {
             "type": "grafana-postgresql-datasource",
             "uid": "portfolio-visitors"
           },
           "gridPos": {
-            "h": 12,
-            "w": 24,
-            "x": 0,
+            "h": 11,
+            "w": 12,
+            "x": 12,
             "y": 30
           },
           "targets": [
@@ -492,7 +696,48 @@ data:
               "format": "table",
               "rawQuery": true,
               "editorMode": "code",
-              "rawSql": "SELECT ts AS \"Time\", host(ip) AS \"IP\", hostname AS \"Reverse DNS\", org AS \"Organisation\", domain AS \"Domain\",\n  city AS \"City\", country AS \"Country\", path AS \"Page\", referer AS \"From\", user_agent AS \"Browser\", bot AS \"Bot\"\nFROM visits WHERE $__timeFilter(ts) AND (${bots} OR NOT bot) AND concat_ws(' ', org, domain, hostname, city, region, country) ILIKE '%' || ${search:sqlstring} || '%'\nORDER BY ts DESC LIMIT 500"
+              "rawSql": "SELECT username AS \"Username\", password AS \"Password\", count(*) AS \"Attempts\",\n  count(DISTINCT ip) AS \"IPs\", max(ts) AS \"Last\"\nFROM visit_sources WHERE $__timeFilter(ts) AND kind = 'login'\n  AND concat_ws(' ', org, domain, city, country, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY username, password ORDER BY count(*) DESC LIMIT 200"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "filterable": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm"
+          }
+        },
+        {
+          "id": 9,
+          "type": "table",
+          "title": "Recent requests",
+          "description": "Status: what Cloudflare answered (302 = sent to the www login, 403 = blocked). Body: start of what was posted to the honeypot.",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "portfolio-visitors"
+          },
+          "gridPos": {
+            "h": 12,
+            "w": 24,
+            "x": 0,
+            "y": 41
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT ts AS \"Time\", source AS \"Source\", host(ip) AS \"IP\", hostname AS \"Reverse DNS\", org AS \"Organisation\",\n  city AS \"City\", country AS \"Country\", method AS \"Method\", path AS \"Path\", status AS \"Status\", hits AS \"Requests\",\n  referer AS \"From\", user_agent AS \"Browser\", payload AS \"Body\"\nFROM visit_sources WHERE $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nORDER BY ts DESC LIMIT 500"
             }
           ],
           "fieldConfig": {
@@ -511,6 +756,18 @@ data:
                   {
                     "id": "custom.width",
                     "value": 300
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Path"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 220
                   }
                 ]
               }

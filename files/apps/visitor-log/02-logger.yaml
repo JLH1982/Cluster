@@ -1,8 +1,12 @@
-# Records each page view of https://portfolio.hinkel-net.com: IP (kept 7 days), city, country,
-# reverse-DNS domain and the IP block's owner (RDAP), so you can see e.g. a company's network.
-# nginx in the website pod sends a copy of every page request here (files/apps/website.yaml).
-# Shown in Grafana by files/platform/grafana-dashboard-visitors.yaml.
-# No custom image: the script below runs on python:slim, with psycopg installed at pod start.
+# Visitor log and honeypot (the script below explains each part):
+# - every page view of https://portfolio.hinkel-net.com, and probes for things a static site
+#   doesn't have (/.env, /wp-login.php...); nginx in the website pod copies them here (website.yaml)
+# - https://admin.hinkel-net.com: a fake admin login (honeypot) served by this app
+# - requests Cloudflare answered itself: www login redirects and Bot Fight Mode blocks
+# Saved with city, country, reverse-DNS domain and network owner. Visitor IPs are kept 7 days,
+# attacker IPs (probes, honeypot) 90 days. Shown in Grafana's "Visitors & Honeypot" dashboard
+# (files/platform/grafana-dashboard-visitors.yaml).
+# No custom image: the script runs on python:slim, with psycopg installed at pod start.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,48 +15,135 @@ metadata:
 data:
   logger.py: |
     #!/usr/bin/env python3
-    # Records portfolio page views in Postgres. nginx in the website pod mirrors each page request
-    # here (files/apps/website.yaml); Cloudflare adds the visitor's IP (CF-Connecting-IP) and
-    # location headers. Answers at once and does the lookups in the background.
-    # After KEEP_IP_DAYS the IP and reverse-DNS name are cleared; city, country, domain and org stay.
-    import ipaddress, json, os, queue, re, socket, threading, time, urllib.request
+    # Visitor log and honeypot, saved in Postgres (one row per request or per Cloudflare sample group).
+    #  :8080  nginx in the portfolio pod mirrors each page view and probe here (files/apps/website.yaml).
+    #  :8081  the admin.hinkel-net.com honeypot: a fake admin login that records every request and the
+    #         usernames/passwords tried. Nothing behind it is real.
+    #  poller requests Cloudflare answered itself (www login redirects, Bot Fight Mode blocks), read
+    #         from Cloudflare's GraphQL API every few minutes. Needs CF_API_TOKEN (Analytics Read).
+    # Cloudflare adds the visitor's IP (CF-Connecting-IP) and location headers to requests that reach
+    # the cluster. IPs and reverse-DNS names are cleared after KEEP_IP_DAYS for visitors (portfolio
+    # pages, www) and after KEEP_ATTACKER_IP_DAYS for probes and the honeypot.
+    import ipaddress, json, os, queue, re, socket, threading, time, urllib.parse, urllib.request
+    from datetime import datetime, timedelta, timezone
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     import psycopg
 
     KEEP_IP_DAYS = int(os.environ.get("KEEP_IP_DAYS", "7"))
+    KEEP_ATTACKER_IP_DAYS = int(os.environ.get("KEEP_ATTACKER_IP_DAYS", "90"))
+    CF_API_TOKEN = os.environ.get("CF_API_TOKEN", "")
+    CF_ZONE_ID = os.environ.get("CF_ZONE_ID", "")
+    WWW_HOST = os.environ.get("WWW_HOST", "www.hinkel-net.com")
+    POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "300"))
+
     BOTS = re.compile(r"bot|crawl|spider|slurp|preview|monitor|uptime|curl|wget|python|go-http|java/|"
                       r"okhttp|headless|scan|fetch|http-client|axios|node", re.I)
     # Second-level labels under country TLDs (example.co.uk -> example.co.uk, not co.uk)
     SECOND_LEVEL = {"co", "com", "net", "org", "gov", "edu", "ac", "ne", "or", "go", "gob", "nic"}
+    # Form fields that carry a login, across common admin panels (WordPress uses log/pwd)
+    USER_FIELDS = ("username", "user", "login", "log", "email", "usr", "name", "uname")
+    PASS_FIELDS = ("password", "pass", "pwd", "passwd", "pw", "secret")
 
     SCHEMA = """
     CREATE TABLE IF NOT EXISTS visits (
       id         bigserial PRIMARY KEY,
       ts         timestamptz NOT NULL DEFAULT now(),
-      ip         inet,     -- cleared after KEEP_IP_DAYS
+      site       text NOT NULL DEFAULT 'portfolio',  -- portfolio, admin (honeypot), www or another host
+      kind       text NOT NULL DEFAULT 'page',       -- page, probe, honeypot, login, edge
+      ip         inet,     -- cleared after KEEP_IP_DAYS / KEEP_ATTACKER_IP_DAYS
       hostname   text,     -- reverse DNS; cleared with the IP (it often contains the IP)
       domain     text,     -- registered domain of hostname, e.g. example.com
-      org        text,     -- owner of the IP block (RDAP): a company, university or ISP
+      org        text,     -- owner of the IP block (RDAP) or network (Cloudflare ASN name)
+      asn        integer,
       city       text,
       region     text,
       country    text,     -- ISO code from Cloudflare
       lat        double precision,
       lon        double precision,
+      method     text,
       path       text,
+      status     integer,  -- edge rows: what Cloudflare answered
+      hits       integer NOT NULL DEFAULT 1,  -- edge rows: requests in this sample group
       referer    text,
       user_agent text,
+      username   text,     -- honeypot login attempts
+      password   text,
+      payload    text,     -- honeypot: start of any other request body
       bot        boolean NOT NULL DEFAULT false
     );
+    ALTER TABLE visits ADD COLUMN IF NOT EXISTS site text NOT NULL DEFAULT 'portfolio';
+    ALTER TABLE visits ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'page';
+    ALTER TABLE visits ADD COLUMN IF NOT EXISTS asn integer;
+    ALTER TABLE visits ADD COLUMN IF NOT EXISTS method text;
+    ALTER TABLE visits ADD COLUMN IF NOT EXISTS status integer;
+    ALTER TABLE visits ADD COLUMN IF NOT EXISTS hits integer NOT NULL DEFAULT 1;
+    ALTER TABLE visits ADD COLUMN IF NOT EXISTS username text;
+    ALTER TABLE visits ADD COLUMN IF NOT EXISTS password text;
+    ALTER TABLE visits ADD COLUMN IF NOT EXISTS payload text;
     CREATE INDEX IF NOT EXISTS visits_ts ON visits (ts);
+    CREATE INDEX IF NOT EXISTS visits_site_kind_ts ON visits (site, kind, ts);
+    -- How far the Cloudflare poller has read
+    CREATE TABLE IF NOT EXISTS poll_state (name text PRIMARY KEY, until timestamptz NOT NULL);
+    -- What Grafana reads: each row labelled with the dashboard's Source choices. Recreated at every
+    -- start so new columns show up (the hourly grant below gives Grafana access again).
+    DROP VIEW IF EXISTS visit_sources;
+    CREATE VIEW visit_sources AS SELECT v.*, CASE
+        WHEN v.kind = 'page' THEN 'portfolio'
+        WHEN v.kind = 'probe' THEN 'probes'
+        WHEN v.site = 'admin' AND v.kind <> 'edge' THEN 'honeypot'
+        WHEN v.site = 'www' THEN 'www'
+        ELSE 'blocked' END AS source
+      FROM visits v;
     """
-    INSERT = """INSERT INTO visits (ip, hostname, domain, org, city, region, country, lat, lon, path, referer, user_agent, bot)
-    VALUES (%(ip)s, %(hostname)s, %(domain)s, %(org)s, %(city)s, %(region)s, %(country)s, %(lat)s, %(lon)s,
-            %(path)s, %(referer)s, %(user_agent)s, %(bot)s)"""
+    COLUMNS = ("ts", "site", "kind", "ip", "hostname", "domain", "org", "asn", "city", "region", "country",
+               "lat", "lon", "method", "path", "status", "hits", "referer", "user_agent", "username",
+               "password", "payload", "bot")
+    INSERT = (f"INSERT INTO visits ({', '.join(COLUMNS)}) VALUES "
+              f"({', '.join('%(' + c + ')s' for c in COLUMNS)})")
     FORGET = """UPDATE visits SET ip = NULL, hostname = NULL
-    WHERE (ip IS NOT NULL OR hostname IS NOT NULL) AND ts < now() - make_interval(days => %s)"""
+    WHERE (ip IS NOT NULL OR hostname IS NOT NULL)
+      AND ts < now() - make_interval(days => CASE WHEN kind IN ('page', 'edge') THEN %s ELSE %s END)"""
 
-    jobs = queue.Queue(maxsize=1000)
+    # Requests Cloudflare answered without asking the cluster: the www login redirect, and blocks or
+    # challenges (Bot Fight Mode, rate limits) on any host. Sampled; count is Cloudflare's estimate.
+    EDGE_QUERY = """query ($zone: string, $from: Time, $to: Time, $www: string) {
+      viewer { zones(filter: {zoneTag: $zone}) {
+        httpRequestsAdaptiveGroups(limit: 5000, orderBy: [datetimeMinute_ASC], filter: {
+            datetime_geq: $from, datetime_lt: $to, originResponseStatus: 0,
+            OR: [{clientRequestHTTPHost: $www}, {edgeResponseStatus_in: [403, 429, 503]}]}) {
+          count
+          dimensions { datetimeMinute clientRequestHTTPHost clientIP clientCountryName clientAsn
+                       clientASNDescription clientRequestHTTPMethodName clientRequestPath
+                       edgeResponseStatus userAgent }
+        }
+      } }
+    }"""
+
+    LOGIN_PAGE = """<!doctype html>
+    <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Administration - Sign in</title>
+    <style>
+    body{margin:0;font-family:system-ui,sans-serif;background:#eef1f5;color:#1f2933;display:flex;min-height:100vh;align-items:center;justify-content:center}
+    form{background:#fff;padding:32px;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.12);width:300px}
+    h1{font-size:20px;margin:0 0 20px}label{display:block;font-size:13px;margin:12px 0 4px}
+    input{width:100%;box-sizing:border-box;padding:9px;border:1px solid #c5ccd6;border-radius:4px;font-size:14px}
+    button{margin-top:20px;width:100%;padding:10px;border:0;border-radius:4px;background:#2f5fd0;color:#fff;font-size:14px}
+    .err{color:#b42318;font-size:13px;margin:0 0 8px}
+    </style></head><body>
+    <form method="post" action="/login">
+    <h1>Administration</h1>
+    ERROR
+    <label for="u">Username</label><input id="u" name="username" autocomplete="username">
+    <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password">
+    <button type="submit">Sign in</button>
+    </form></body></html>
+    """
+    NOT_FOUND = "<html><head><title>404 Not Found</title></head><body><center><h1>404 Not Found</h1></center><hr><center>nginx</center></body></html>\n"
+    LOGIN_PATHS = re.compile(r"^/(|admin|administrator|login|signin|wp-login\.php|wp-admin|user/login|"
+                             r"admin/login|cpanel|manager/html|phpmyadmin|pma)/?$", re.I)
+
+    jobs = queue.Queue(maxsize=5000)
     cache = {}  # ip -> (time, hostname, domain, org)
 
 
@@ -105,7 +196,7 @@ data:
         except OSError:
             hostname = None
         result = (hostname, hostname and registered_domain(hostname), network_owner(ip))
-        if len(cache) > 5000:
+        if len(cache) > 20000:
             cache.clear()
         cache[ip] = (time.time(),) + result
         return result
@@ -129,20 +220,56 @@ data:
         return s[:limit] or None
 
 
+    def is_bot(ua):
+        return not ua or bool(BOTS.search(ua))
+
+
+    def from_request(h, **v):
+        """A row from a request that came through Cloudflare, or None (LAN, health check)."""
+        try:
+            ip = ipaddress.ip_address((h.get("CF-Connecting-IP") or "").strip())
+        except ValueError:
+            return None
+        if not ip.is_global:
+            return None
+        ua = utf8(h.get("User-Agent"))
+        row = dict.fromkeys(COLUMNS)
+        row.update(ts=datetime.now(timezone.utc), ip=str(ip), hits=1, user_agent=ua, bot=is_bot(ua),
+                   city=utf8(h.get("CF-IPCity"), 100), region=utf8(h.get("CF-Region"), 100),
+                   country=utf8(h.get("CF-IPCountry"), 10), lat=number(h.get("CF-IPLatitude")),
+                   lon=number(h.get("CF-IPLongitude")), referer=utf8(h.get("Referer"), 1000))
+        row.update(v)
+        return row
+
+
+    def queue_row(row):
+        if row:
+            try:
+                jobs.put_nowait(row)
+            except queue.Full:
+                log("queue full, request not recorded")
+
+
+    def insert(conn, rows):
+        for _ in range(3):
+            try:
+                with conn.cursor() as cur:
+                    cur.executemany(INSERT, rows)
+                return conn
+            except psycopg.Error as e:
+                log("insert failed, reconnecting:", e)
+                conn.close()
+                time.sleep(5)
+                conn = connect()
+        return conn
+
+
     def writer():
         conn = connect()
         while True:
-            v = jobs.get()
-            v["hostname"], v["domain"], v["org"] = lookup(v["ip"])
-            for _ in range(3):
-                try:
-                    conn.execute(INSERT, v)
-                    break
-                except psycopg.Error as e:
-                    log("insert failed, reconnecting:", e)
-                    conn.close()
-                    time.sleep(5)
-                    conn = connect()
+            row = jobs.get()
+            row["hostname"], row["domain"], row["org"] = lookup(row["ip"])
+            conn = insert(conn, [row])
 
 
     def forgetter():
@@ -150,13 +277,13 @@ data:
         while True:
             try:
                 # Repeated hourly: the grafana role (from 01-database.yaml) may appear after the logger starts
-                conn.execute("GRANT SELECT ON visits TO grafana")
+                conn.execute("GRANT SELECT ON visits, visit_sources TO grafana")
             except psycopg.Error as e:
                 log("could not give Grafana read access (role missing?):", e)
             try:
-                n = conn.execute(FORGET, (KEEP_IP_DAYS,)).rowcount
+                n = conn.execute(FORGET, (KEEP_IP_DAYS, KEEP_ATTACKER_IP_DAYS)).rowcount
                 if n:
-                    log(f"cleared the IP of {n} visits older than {KEEP_IP_DAYS} days")
+                    log(f"cleared the IP of {n} old requests")
             except psycopg.Error as e:
                 log("clearing old IPs failed:", e)
                 conn.close()
@@ -164,30 +291,76 @@ data:
             time.sleep(3600)
 
 
-    class Handler(BaseHTTPRequestHandler):
+    def cloudflare(query, variables):
+        req = urllib.request.Request(
+            "https://api.cloudflare.com/client/v4/graphql",
+            data=json.dumps({"query": query, "variables": variables}).encode(),
+            headers={"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            d = json.load(r)
+        if d.get("errors"):
+            raise RuntimeError("; ".join(e.get("message", "?") for e in d["errors"]))
+        return d["data"]
+
+
+    def site_of(host):
+        # www.hinkel-net.com -> www, photos.hinkel-net.com -> photos
+        host = (host or "").lower()
+        zone = WWW_HOST.split(".", 1)[-1]
+        return host.removesuffix("." + zone) if host.endswith("." + zone) else (host or None)
+
+
+    def edge_poller():
+        if not (CF_API_TOKEN and CF_ZONE_ID):
+            log("CF_API_TOKEN or CF_ZONE_ID not set: not reading Cloudflare's edge requests")
+            return
+        conn = connect()
+        while True:
+            try:
+                row = conn.execute("SELECT until FROM poll_state WHERE name = 'edge'").fetchone()
+                start = row[0] if row else datetime.now(timezone.utc) - timedelta(hours=1)
+                # Cloudflare's data arrives a few minutes late; whole minutes, at most 6 hours per query
+                end = min(datetime.now(timezone.utc) - timedelta(minutes=5), start + timedelta(hours=6))
+                end = end.replace(second=0, microsecond=0)
+                if end > start:
+                    data = cloudflare(EDGE_QUERY, {"zone": CF_ZONE_ID, "www": WWW_HOST,
+                                                   "from": start.isoformat(), "to": end.isoformat()})
+                    groups = data["viewer"]["zones"][0]["httpRequestsAdaptiveGroups"]
+                    rows = []
+                    for g in groups:
+                        d = g["dimensions"]
+                        ua = d.get("userAgent") or None
+                        r = dict.fromkeys(COLUMNS)
+                        r.update(ts=datetime.fromisoformat(d["datetimeMinute"].replace("Z", "+00:00")), site=site_of(d.get("clientRequestHTTPHost")), kind="edge",
+                                 ip=d.get("clientIP") or None, country=d.get("clientCountryName") or None,
+                                 asn=d.get("clientAsn") or None, org=d.get("clientASNDescription") or None,
+                                 method=d.get("clientRequestHTTPMethodName"), path=(d.get("clientRequestPath") or "")[:1000],
+                                 status=d.get("edgeResponseStatus"), hits=max(1, int(g["count"])),
+                                 user_agent=ua and ua[:500], bot=is_bot(ua))
+                        rows.append(r)
+                    if rows:
+                        conn = insert(conn, rows)
+                    conn.execute("INSERT INTO poll_state VALUES ('edge', %s) ON CONFLICT (name) DO UPDATE SET until = EXCLUDED.until", (end,))
+                    if len(groups) == 5000:
+                        log("Cloudflare returned the 5000-group maximum; some edge requests were not recorded")
+                    if end < datetime.now(timezone.utc) - timedelta(minutes=10):
+                        continue  # catching up after downtime
+            except psycopg.Error as e:
+                log("edge poller database error:", e)
+                conn.close()
+                conn = connect()
+            except Exception as e:
+                log("reading Cloudflare's edge requests failed:", e)
+            time.sleep(POLL_SECONDS)
+
+
+    class Mirror(BaseHTTPRequestHandler):
+        """Copies of portfolio requests from nginx (only the headers; nginx sends no body)."""
         def do_GET(self):
             h = self.headers
-            try:
-                ip = ipaddress.ip_address((h.get("CF-Connecting-IP") or "").strip())
-            except ValueError:
-                ip = None  # not through Cloudflare (LAN, health check): nothing to record
-            if ip and ip.is_global:
-                ua = utf8(h.get("User-Agent"))
-                try:
-                    jobs.put_nowait({
-                        "ip": str(ip),
-                        "city": utf8(h.get("CF-IPCity"), 100),
-                        "region": utf8(h.get("CF-Region"), 100),
-                        "country": utf8(h.get("CF-IPCountry"), 10),
-                        "lat": number(h.get("CF-IPLatitude")),
-                        "lon": number(h.get("CF-IPLongitude")),
-                        "path": utf8(h.get("X-Original-URI"), 1000),
-                        "referer": utf8(h.get("Referer"), 1000),
-                        "user_agent": ua,
-                        "bot": not ua or bool(BOTS.search(ua)),
-                    })
-                except queue.Full:
-                    log("queue full, visit dropped")
+            queue_row(from_request(h, site="portfolio", kind=h.get("X-Visit-Kind") or "page",
+                                   method=utf8(h.get("X-Original-Method"), 10),
+                                   path=utf8(h.get("X-Original-URI"), 1000)))
             self.send_response(204)
             self.end_headers()
 
@@ -197,14 +370,65 @@ data:
             pass
 
 
+    class Honeypot(BaseHTTPRequestHandler):
+        """admin.hinkel-net.com: a fake admin login. Records everything, grants nothing."""
+        def version_string(self):
+            return "nginx"
+
+        def reply(self, code, body):
+            data = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(data)
+
+        def handle_any(self):
+            path = self.path.split("?", 1)[0]
+            size = min(int(self.headers.get("Content-Length") or 0), 16384)
+            body = self.rfile.read(size).decode("utf-8", "replace") if size > 0 else ""
+            username = password = payload = None
+            if body:
+                form = urllib.parse.parse_qs(body, keep_blank_values=True)
+                pick = lambda names: next((form[n][0] for n in names if n in form), None)
+                username, password = pick(USER_FIELDS), pick(PASS_FIELDS)
+                if username is None and password is None:
+                    payload = body[:2000]
+            login = self.command == "POST" and (username is not None or password is not None)
+            queue_row(from_request(self.headers, site="admin", kind="login" if login else "honeypot",
+                                   method=self.command[:10], path=utf8(self.path, 1000),
+                                   username=username and username[:200], password=password and password[:200],
+                                   payload=payload))
+            if login:
+                time.sleep(1.5)  # like a real password check
+                self.reply(200, LOGIN_PAGE.replace("ERROR", '<p class="err">Invalid username or password.</p>'))
+            elif LOGIN_PATHS.match(path):
+                self.reply(200, LOGIN_PAGE.replace("ERROR", ""))
+            else:
+                self.reply(404, NOT_FOUND)
+
+        do_GET = do_POST = do_HEAD = do_PUT = do_DELETE = do_OPTIONS = do_PATCH = handle_any
+
+        def log_message(self, *args):
+            pass
+
+
+    def serve(port, handler):
+        ThreadingHTTPServer(("", port), handler).serve_forever()
+
+
     def main():
         conn = connect()
         conn.execute(SCHEMA)
         conn.close()
-        threading.Thread(target=writer, daemon=True).start()
-        threading.Thread(target=forgetter, daemon=True).start()
-        log(f"listening on :8080, keeping IPs for {KEEP_IP_DAYS} days")
-        ThreadingHTTPServer(("", 8080), Handler).serve_forever()
+        for target in (writer, forgetter, edge_poller):
+            threading.Thread(target=target, daemon=True).start()
+        threading.Thread(target=serve, args=(8081, Honeypot), daemon=True).start()
+        log(f"listening on :8080 (portfolio) and :8081 (honeypot); keeping visitor IPs {KEEP_IP_DAYS} days, "
+            f"attacker IPs {KEEP_ATTACKER_IP_DAYS} days")
+        serve(8080, Mirror)
 
 
     if __name__ == "__main__":
@@ -226,7 +450,7 @@ spec:
         app: visitor-log
       annotations:
         # Bump to restart the pod after changing the script
-        visitor-log/script-version: "1"
+        visitor-log/script-version: "2"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -247,6 +471,8 @@ spec:
           env:
             - {name: PYTHONPATH, value: /deps}
             - {name: KEEP_IP_DAYS, value: "7"}
+            - {name: KEEP_ATTACKER_IP_DAYS, value: "90"}
+            - {name: WWW_HOST, value: www.hinkel-net.com}
             - {name: PGHOST, value: visitor-log-database-rw}
             - {name: PGDATABASE, value: visitorlog}
             - {name: PGSSLMODE, value: require}
@@ -254,14 +480,21 @@ spec:
               valueFrom: {secretKeyRef: {name: visitor-log-db, key: username}}
             - name: PGPASSWORD
               valueFrom: {secretKeyRef: {name: visitor-log-db, key: password}}
+            # Cloudflare API token (Zone > Analytics > Read) for the edge requests; without it
+            # the rest still works
+            - name: CF_API_TOKEN
+              valueFrom: {secretKeyRef: {name: visitor-log-cloudflare, key: api-token, optional: true}}
+            - name: CF_ZONE_ID
+              valueFrom: {secretKeyRef: {name: visitor-log-cloudflare, key: zone-id, optional: true}}
           ports:
-            - containerPort: 8080
+            - {name: mirror, containerPort: 8080}
+            - {name: honeypot, containerPort: 8081}
           readinessProbe:
             tcpSocket: {port: 8080}
             periodSeconds: 10
           resources:
-            requests: {cpu: 10m, memory: 32Mi}
-            limits: {memory: 128Mi}
+            requests: {cpu: 10m, memory: 40Mi}
+            limits: {memory: 192Mi}
           volumeMounts:
             - {name: script, mountPath: /app}
             - {name: deps, mountPath: /deps}
@@ -280,5 +513,28 @@ spec:
   selector:
     app: visitor-log
   ports:
-    - port: 8080
-      targetPort: 8080
+    - {name: mirror, port: 8080, targetPort: 8080}
+    - {name: honeypot, port: 8081, targetPort: 8081}
+---
+# The honeypot's public name, via the Cloudflare tunnel (route and DNS record are set in the
+# Cloudflare dashboard, like the other public hostnames)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: honeypot
+  namespace: visitor-log
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: admin.hinkel-net.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: visitor-log
+                port:
+                  number: 8081

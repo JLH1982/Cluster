@@ -119,27 +119,42 @@ DNS record `*.lan.hinkel-net.com` (DNS only, not proxied) points at Traefik's LA
 - **If Authentik is down:** Longhorn and Z-Wave can go back to their old password login; the
   middleware to swap in is noted in their Ingress files. Grafana's `admin` login always works.
 
-## Portfolio visitor log
+## Visitor log and honeypot
 
-Every page view of https://portfolio.hinkel-net.com is recorded, so you can see whether someone at a
-company you applied to looked at it. Grafana > Dashboards > **Portfolio Visitors** shows a world map
-(one dot per city, with the number of views when more than one) and tables of who visited.
+Records who opens https://portfolio.hinkel-net.com (so you can see whether someone at a company you
+applied to looked at it), what scanners probe for, and a honeypot. Grafana > Dashboards >
+**Visitors & Honeypot** shows a world map (dots with the number of requests when more than one) and
+tables; the **Source** dropdown switches between Portfolio visitors, Portfolio probes, Honeypot
+(admin), www login page and Blocked by Cloudflare (several or All at once).
 
-How it works: nginx in the website pod sends a copy of each page request (pages and PDFs, not
-images/CSS/JS) to the `visitor-log` app (`files/apps/visitor-log/`), which saves it in its own
-Postgres. Cloudflare supplies the visitor's IP (`CF-Connecting-IP`) and city/country/coordinates;
-the location headers come from the zone setting Rules > Settings > Managed Transforms >
-**Add visitor location headers** (turned on 2026-10-25; it is not part of these scripts). The app
-also looks up the IP's reverse-DNS name (domain) and the owner of its IP block (RDAP: a company,
-university or ISP).
+Where the data comes from (all in the `visitor-log` app, `files/apps/visitor-log/`, saved in its own
+Postgres):
+- **Portfolio:** nginx in the website pod sends a copy of each page view and each probe (things a
+  static site doesn't have: `/.env`, `/wp-login.php`, `/phpmyadmin/`...) to the app.
+- **Honeypot:** https://admin.hinkel-net.com is a fake admin login served by the app. It records
+  every request, the usernames/passwords tried and anything else posted. Nothing behind it is real.
+- **Cloudflare:** requests Cloudflare answered itself - the www login page (www is behind
+  Cloudflare Access, so those never reach the cluster) and bots blocked by Bot Fight Mode on any
+  host - read from Cloudflare's GraphQL API every 5 minutes. Needs the optional Analytics Read token
+  (asked for by `new-visitor-log-secrets.yml`). Cloudflare samples these and gives a country, not a city.
 
-- **Kept 7 days:** the IP address and the full reverse-DNS name (it often contains the IP).
-- **Kept for good:** time, city, region, country, coordinates, domain, organisation, page, referrer,
-  browser. Change `KEEP_IP_DAYS` in `02-logger.yaml` to keep IPs longer or shorter.
-- **Bots** (crawlers, link previews, Uptime Kuma) are flagged from the browser name and hidden by
-  default; the dashboard's "Bots and monitors" switch shows them.
+Cloudflare supplies the visitor's IP (`CF-Connecting-IP`) and city/country/coordinates for requests
+that reach the cluster; the location headers come from the zone setting Rules > Settings > Managed
+Transforms > **Add visitor location headers** (turned on 2026-10-25). The app also looks up the
+reverse-DNS name (domain) and the owner of the IP block (RDAP: a company, university or ISP).
+
+Set in the Cloudflare dashboard, not by these scripts: that setting, and the admin.hinkel-net.com
+tunnel route and DNS record (added 2026-10-26). Also there: the bare domain hinkel-net.com goes to
+the portfolio (Rules > Redirect Rules > "Bare domain to the portfolio", 301, keeps the path).
+
+- **IP addresses** (and the full reverse-DNS name, which often contains the IP) are deleted after
+  **7 days** for visitors (portfolio pages, www) and **90 days** for probes and the honeypot.
+  Everything else is kept. Change `KEEP_IP_DAYS` / `KEEP_ATTACKER_IP_DAYS` in `02-logger.yaml`.
+- **Bots** on the portfolio (crawlers, link previews, Uptime Kuma) are flagged from the browser name
+  and hidden by default ("Bots on the portfolio" switch).
 - A company only shows up by name when the visitor is on the company's own network (office or VPN).
   From home or a phone you'll see the ISP (Comcast, Verizon...) and the city.
+- Don't type a real password into admin.hinkel-net.com: it is stored in plain text like every other attempt.
 
 ## Alerts
 

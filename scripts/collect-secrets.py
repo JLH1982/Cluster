@@ -32,4 +32,9 @@ out = {
     "vault_visitor_log_db_password": secret("visitor-log", "visitor-log-db")["password"],
     "vault_visitor_log_grafana_db_password": secret("visitor-log", "visitor-log-grafana")["password"],
 }
+# Optional: only there if a Cloudflare token was entered in new-visitor-log-secrets.yml
+try:
+    out["vault_visitor_log_cloudflare"] = secret("visitor-log", "visitor-log-cloudflare")
+except subprocess.CalledProcessError:
+    pass
 print(yaml.safe_dump(out, sort_keys=False, width=1000))
