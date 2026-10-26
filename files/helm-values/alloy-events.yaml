@@ -1,0 +1,48 @@
+# Grafana Alloy, one copy for the cluster: Kubernetes warning events and node events (not ready,
+# rebooted) to Loki. The per-Pi copy is alloy.yaml.
+alloy:
+  configMap:
+    content: |
+      // One copy for the whole cluster (a second Alloy release with 1 replica, so events aren't
+      // collected four times): Kubernetes warning events, plus node events (not ready, rebooted).
+
+      loki.write "default" {
+        endpoint {
+          url = "http://loki.logging.svc:3100/loki/api/v1/push"
+        }
+      }
+
+      loki.source.kubernetes_events "cluster" {
+        log_format = "logfmt"
+        forward_to = [loki.process.events.receiver]
+      }
+
+      loki.process "events" {
+        stage.static_labels {
+          values = {source = "events"}
+        }
+
+        // Normal events are routine (pulled, created, started...), except a node going away or coming back
+        stage.match {
+          selector            = "{source=\"events\"} |= `type=Normal` !~ `reason=(NodeNotReady|NodeReady|Rebooted|Starting|NodeHasDiskPressure|NodeHasMemoryPressure|NodeHasInsufficientMemory|RemovingNode)`"
+          action              = "drop"
+          drop_counter_reason = "routine_event"
+        }
+
+        forward_to = [loki.write.default.receiver]
+      }
+
+  enableReporting: false
+  resources:
+    requests: {cpu: 10m, memory: 48Mi}
+    limits: {memory: 192Mi}
+
+controller:
+  type: deployment
+  replicas: 1
+
+rbac:
+  rules:
+    - apiGroups: [""]
+      resources: ["events"]
+      verbs: ["get", "list", "watch"]

@@ -1,4 +1,4 @@
-# Cluster platform: load balancer, ingress, storage, monitoring, databases.
+# Cluster platform: load balancer, ingress, storage, monitoring, problem logs, databases.
 # Everything runs on the master with kubectl/helm. Releases that already match are skipped.
 - name: Cluster platform
   hosts: k3s_init
@@ -177,8 +177,28 @@
       vars: {release: prometheus, ns: monitoring, chart: prometheus-community/kube-prometheus-stack, version: 92.9.0, values: helm-values/prometheus.yaml, wait_timeout: 15m}
 
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
-      loop: [platform/k3s-alerts.yaml, platform/local-path-alerts.yaml, platform/traefik-servicemonitor.yaml, platform/grafana-dashboard-raspberry-pi.yaml, platform/grafana-dashboards-unifi.yaml, platform/grafana-dashboard-visitors.yaml]
+      loop: [platform/k3s-alerts.yaml, platform/local-path-alerts.yaml, platform/traefik-servicemonitor.yaml, platform/grafana-dashboard-raspberry-pi.yaml, platform/grafana-dashboards-unifi.yaml, platform/grafana-dashboard-visitors.yaml, platform/grafana-dashboard-problems.yaml]
       loop_control: {loop_var: src}
+
+    # ---- Problem logs (Grafana's "Cluster Problems" dashboard) ----
+    # Loki keeps 30 days of warnings and errors; Alloy collects them (one per Pi, plus one for
+    # Kubernetes events).
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars: {release: loki, ns: logging, chart: grafana/loki, version: 7.3.0, values: helm-values/loki.yaml}
+
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars: {release: alloy, ns: logging, chart: grafana/alloy, version: 1.13.1, values: helm-values/alloy.yaml}
+
+    - ansible.builtin.include_tasks: tasks/helm-release.yml
+      vars: {release: alloy-events, ns: logging, chart: grafana/alloy, version: 1.13.1, values: helm-values/alloy-events.yaml}
+
+    # Loki at a fixed IP for the Pis' fail2ban ban sharing (files/host/fail2ban/)
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: platform/loki-host-service.yaml}
+
+    # Phone alerts from the logs: under-voltage, disk errors, out of memory, fail2ban bans
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: platform/log-alerts.yaml}
 
     # ---- Databases ----
     - ansible.builtin.include_tasks: tasks/helm-release.yml

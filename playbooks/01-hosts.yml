@@ -25,6 +25,10 @@
       ansible.builtin.shell: systemctl restart systemd-journald && journalctl --flush
     - name: Reload fail2ban
       ansible.builtin.command: fail2ban-client reload
+    - name: Restart fail2ban
+      ansible.builtin.systemd_service:
+        name: fail2ban
+        state: restarted
     - name: Regenerate swap units
       ansible.builtin.shell: systemctl daemon-reload && systemctl reset-failed
   tasks:
@@ -217,6 +221,40 @@
         dest: /etc/fail2ban/jail.d/cluster.local
         mode: "0644"
       notify: Reload fail2ban
+
+    # Bans then reach Grafana's "Cluster Problems" dashboard with the rest of the journal (Alloy)
+    - name: Send fail2ban's log to the system journal
+      ansible.builtin.copy:
+        content: |
+          # Managed by Ansible (01-hosts.yml). Instead of /var/log/fail2ban.log.
+          [Definition]
+          logtarget = SYSTEMD-JOURNAL
+        dest: /etc/fail2ban/fail2ban.d/cluster.local
+        mode: "0644"
+      notify: Restart fail2ban
+
+    # A device banned on one Pi is banned on all four (read from Loki every minute; does nothing
+    # until Loki is installed by 03-platform.yml)
+    - name: Install the fail2ban ban sharing script
+      ansible.builtin.template:
+        src: ../files/host/fail2ban/fail2ban-cluster-sync.j2
+        dest: /usr/local/sbin/fail2ban-cluster-sync
+        mode: "0755"
+
+    - name: Install the fail2ban ban sharing timer
+      ansible.builtin.copy:
+        src: "../files/host/fail2ban/{{ item }}"
+        dest: /etc/systemd/system/
+        mode: "0644"
+      loop: [fail2ban-cluster-sync.service, fail2ban-cluster-sync.timer]
+      register: f2b_sync_units
+
+    - name: Start the fail2ban ban sharing timer
+      ansible.builtin.systemd_service:
+        name: fail2ban-cluster-sync.timer
+        enabled: true
+        state: started
+        daemon_reload: "{{ f2b_sync_units is changed }}"
 
     # ---- Sudo ----
     # Raspberry Pi OS's 010_global-tty lets any session reuse a recent sudo; later files win.

@@ -120,6 +120,11 @@ data:
           <div class="desc">Who viewed the portfolio, what scanners try</div>
           <div class="url">grafana.lan.hinkel-net.com/d/portfolio-visitors</div>
         </a>
+        <a class="card" href="https://grafana.lan.hinkel-net.com/d/cluster-problems">
+          <div class="name"><span class="icon">🚨</span>Cluster problems<span class="badge">home</span></div>
+          <div class="desc">Errors, warnings, reboots, fail2ban</div>
+          <div class="url">grafana.lan.hinkel-net.com/d/cluster-problems</div>
+        </a>
         <a class="card" href="https://longhorn.lan.hinkel-net.com">
           <div class="name"><span class="icon">💾</span>Longhorn<span class="badge">home</span></div>
           <div class="desc">Storage and volumes</div>

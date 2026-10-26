@@ -24,6 +24,14 @@ spec:
     requests: {cpu: 20m, memory: 96Mi}
     limits: {memory: 256Mi}
 
+  # Keep the write-ahead log small (Postgres' default lets it grow to 1GB, the whole volume).
+  # Data is ~0.5KB per request: 1Gi holds a few years of portfolio + honeypot traffic. The
+  # volume can be grown later (Longhorn resizes online).
+  postgresql:
+    parameters:
+      max_wal_size: 192MB
+      min_wal_size: 64MB
+
   bootstrap:
     initdb:
       database: visitorlog

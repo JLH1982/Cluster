@@ -1,0 +1,9 @@
+# Managed by Ansible (01-hosts.yml)
+[Unit]
+Description=Share fail2ban bans with the other Pis
+After=fail2ban.service
+Requires=fail2ban.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fail2ban-cluster-sync

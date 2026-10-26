@@ -1,0 +1,18 @@
+# Loki at a fixed in-cluster IP, so programs on the Pis themselves (not in pods, where there is no
+# cluster DNS) can query it: the fail2ban ban sharing (files/host/fail2ban/). The IP is
+# loki_service_ip in vars.yml and must stay inside the service range (10.43.0.0/16).
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki-host
+  namespace: logging
+spec:
+  clusterIP: 10.43.35.71
+  selector:
+    app.kubernetes.io/name: loki
+    app.kubernetes.io/instance: loki
+    app.kubernetes.io/component: single-binary
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100

@@ -1,0 +1,55 @@
+# Alerts from the problem logs, evaluated by Loki's ruler (helm-values/loki.yaml) and sent to
+# Alertmanager, which pushes them to the phone through ntfy like the Prometheus alerts.
+# Loaded by Loki's rules sidecar (label loki_rule).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: log-alerts
+  namespace: logging
+  labels:
+    loki_rule: "1"
+data:
+  log-alerts.yaml: |
+    groups:
+      - name: pi-hardware
+        rules:
+          # The Pi 5 needs 5V/5A; under-voltage causes throttling, disk errors and resets
+          - alert: PiUnderVoltage
+            expr: sum by (node) (count_over_time({source="journal", unit="kernel"} |~ "(?i)under-?voltage" [5m])) > 0
+            labels:
+              severity: critical
+            annotations:
+              summary: "{{ $labels.node }}: under-voltage"
+              description: "The power supply or cable can't keep up. See Grafana > Cluster Problems > Hardware, power and disks."
+
+          - alert: PiDiskErrors
+            expr: |
+              sum by (node) (count_over_time({source="journal", unit="kernel"}
+                |~ "(?i)(i/o error|ext4-fs error|nvme.*(timeout|reset|abort)|reset (high|super)[ -]?speed usb)" [10m])) > 0
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.node }}: disk or USB errors"
+              description: "The kernel reported disk I/O errors or a USB/NVMe reset. See Grafana > Cluster Problems > Hardware, power and disks."
+
+          - alert: PiOutOfMemory
+            expr: sum by (node) (count_over_time({source="journal", unit="kernel"} |~ "(?i)out of memory: killed process" [10m])) > 0
+            labels:
+              severity: warning
+            annotations:
+              summary: "{{ $labels.node }}: out of memory"
+              description: "The kernel killed a process to free memory. See Grafana > Cluster Problems."
+
+      - name: security
+        rules:
+          # SSH is only open to the home network and VPN, so a ban is one of your devices or
+          # something on your network trying passwords
+          - alert: Fail2banBan
+            expr: |
+              sum by (node, ip) (count_over_time({unit="fail2ban.service"} |= "] Ban "
+                | regexp "Ban (?P<ip>[0-9a-fA-F.:]+)" [5m])) > 0
+            labels:
+              severity: warning
+            annotations:
+              summary: "fail2ban banned {{ $labels.ip }} on {{ $labels.node }}"
+              description: "Repeated failed SSH logins from {{ $labels.ip }}. See Grafana > Cluster Problems > Security."

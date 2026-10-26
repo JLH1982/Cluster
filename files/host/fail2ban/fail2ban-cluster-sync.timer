@@ -1,0 +1,11 @@
+# Managed by Ansible (01-hosts.yml)
+[Unit]
+Description=Share fail2ban bans with the other Pis every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

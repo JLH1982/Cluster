@@ -14,8 +14,8 @@ running and only changes the differences.
 | `playbooks/site.yml` | Everything below, in order (01 to 05) |
 | `01-hosts.yml` | OS setup on all Pis: packages, kernel settings, IPv6 off, firewall (SSH only from the LAN and the Teleport VPN, 192.168.2.0/24), fail2ban (never bans your phone, laptop or tablet), SSH keys only (no passwords, no root), per-session sudo, journal kept on disk, no swap, Bluetooth/avahi/udisks2/rpcbind off, automatic updates with staggered reboots, Longhorn disks |
 | `02-k3s.yml` | Installs k3s (master first, then node2/node3, then node1). Never touches a running node |
-| `03-platform.yml` | MetalLB, Traefik, cert-manager, Longhorn, Prometheus/Grafana, CloudNativePG |
-| `04-apps.yml` | Cloudflare tunnel, Authentik, portfolio site + visitor log, onion site, Immich, Home Assistant + Z-Wave, Uptime Kuma, homepage (www), UniFi Poller |
+| `03-platform.yml` | MetalLB, Traefik, cert-manager, Longhorn, Prometheus/Grafana, Loki + Alloy (problem logs), CloudNativePG |
+| `04-apps.yml` | Cloudflare tunnel, Authentik, portfolio site + visitor log, pool supply sample page (pool.hinkel-net.com), onion site, Immich, Home Assistant + Z-Wave, Uptime Kuma, homepage (www), UniFi Poller |
 | `05-maintenance.yml` | Weekly etcd defrag, daily Immich patch-update and daily cloudflared update timers on the master |
 | `backup.yml` | Copies app data to `backups/<date-time>/` on this laptop |
 | `restore-data.yml` | Puts a backup's data back into a (re)built cluster |
@@ -98,6 +98,27 @@ to S3 bucket `<your-cluster-backup-bucket>` (folder `cluster-ansible/`). The lap
 `cluster-ansible-backup`) can only upload: it can't list, download or delete, so restores go through
 the AWS console. Nothing expires automatically. See REBUILD.md "Laptop gone?".
 
+## Database backups to S3
+
+Every night at 2:15 AM the `db-backup` CronJob (`files/apps/db-backup.yaml`) dumps the **Authentik**
+(users, MFA devices) and **visitor log** databases, encrypts them with rclone (passphrase
+`vault_db_backup_passphrase` in the vault) and uploads them to the photo-backup bucket, folder
+`db-dumps/` (`authentik.dump.bin`, `visitorlog.dump.bin`). Each night replaces the last; the bucket
+keeps old versions 90 days, so any of the last 90 nights can be restored (AWS console > the file >
+Versions). Immich's database isn't included: Immich dumps it itself and the photo backup copies it.
+A failed or missed night alerts the phone. `backup.yml` still makes local backups as before.
+
+- **Run it now:** `sudo kubectl -n db-backup create job --from=cronjob/db-backup db-backup-manual`
+- **Restore:** download and decrypt on any machine with rclone, then load it with `restore-data.yml`:
+  ```bash
+  export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...   # the photo-backup key (vault_immich_s3_backup)
+  export RCLONE_CRYPT_REMOTE=":s3,provider=AWS,env_auth=true,region=us-east-2:<bucket>/db-dumps"
+  export RCLONE_CRYPT_FILENAME_ENCRYPTION=off RCLONE_CRYPT_PASSWORD="$(rclone obscure '<vault_db_backup_passphrase>')"
+  rclone copy :crypt:authentik.dump backups/from-s3/ && mv backups/from-s3/authentik.dump backups/from-s3/authentik-db.dump
+  ansible-playbook playbooks/restore-data.yml -e backup=backups/from-s3 -e only=authentik-db -e confirm=yes
+  ```
+  (`visitorlog.dump` the same way, renamed `visitor-log-db.dump`, with `only=visitor-log-db`.)
+
 ## Home-network apps: names, HTTPS and login
 
 The home-network apps are at `https://<app>.lan.hinkel-net.com`: `home`, `grafana`, `uptime`,
@@ -118,6 +139,31 @@ DNS record `*.lan.hinkel-net.com` (DNS only, not proxied) points at Traefik's LA
   and the www login stays Cloudflare Access + Cognito.
 - **If Authentik is down:** Longhorn and Z-Wave can go back to their old password login; the
   middleware to swap in is noted in their Ingress files. Grafana's `admin` login always works.
+
+## Problem logs (Cluster Problems dashboard)
+
+Grafana > Dashboards > **Cluster Problems** shows only what went wrong, for the last 30 days, with a
+Node dropdown and a search box:
+- **Summary:** errors, warnings, pod errors, reboots, container restarts and fail2ban bans.
+- **Timeline:** problems per Pi (red markers = reboots), uptime, CPU temperature (Pi 5s throttle
+  from 85 °C), and which containers restarted.
+- **Logs:** hardware/power/disks (under-voltage, USB and disk resets, I/O errors, out of memory,
+  boots and shutdowns), k3s and etcd, Kubernetes warning events and node not-ready/reboots,
+  fail2ban bans and failed SSH logins, pod errors, and everything else from the Pis' journals.
+
+How it works: **Alloy** runs on every Pi (`helm-values/alloy.yaml`) and reads the system journal
+(kept on disk, `files/host/journald/`) and the pod logs, keeps only warnings and worse plus known
+trouble signs, and sends them to **Loki** (`helm-values/loki.yaml`, one instance, 5Gi Longhorn volume,
+never on node1). A second Alloy (`alloy-events.yaml`) sends Kubernetes events once for the cluster.
+fail2ban writes to the journal (01-hosts.yml) so its bans are included, and a device banned on
+one Pi is banned on all four within a minute (`fail2ban-cluster-sync` timer on each Pi, reading the
+bans from Loki at the fixed IP `loki_service_ip`; `files/host/fail2ban/`). Reboots, uptime,
+temperatures and restarts come from Prometheus. The logs aren't in `backup.yml`: they're only kept
+30 days anyway.
+
+After an unexpected reset, open "Hardware, power and disks" around the red reboot marker. A hard
+reset often leaves nothing in the log just before it; if the last lines are normal and the next is
+"Booting Linux", suspect power or heat rather than software.
 
 ## Visitor log and honeypot
 
@@ -144,8 +190,10 @@ Transforms > **Add visitor location headers** (turned on 2026-10-25). The app al
 reverse-DNS name (domain) and the owner of the IP block (RDAP: a company, university or ISP).
 
 Set in the Cloudflare dashboard, not by these scripts: that setting, and the admin.hinkel-net.com
-tunnel route and DNS record (added 2026-10-26). Also there: the bare domain hinkel-net.com goes to
-the portfolio (Rules > Redirect Rules > "Bare domain to the portfolio", 301, keeps the path).
+tunnel route and DNS record (added 2026-10-26), and the same for pool.hinkel-net.com. Also there: the bare domain hinkel-net.com goes to
+the portfolio (Rules > Redirect Rules > "Bare domain to the portfolio", 301, keeps the path), and
+the block list: account IP list `honeypot_attackers` (Manage Account > Configurations > Lists) and the
+zone rule Security > WAF > Custom rules > "Block honeypot attackers" (added 2026-10-26).
 
 - **IP addresses** (and the full reverse-DNS name, which often contains the IP) are deleted after
   **7 days** for visitors (portfolio pages, www) and **90 days** for probes and the honeypot.
@@ -155,6 +203,19 @@ the portfolio (Rules > Redirect Rules > "Bare domain to the portfolio", 301, kee
 - A company only shows up by name when the visitor is on the company's own network (office or VPN).
   From home or a phone you'll see the ISP (Comcast, Verizon...) and the city.
 - Don't type a real password into admin.hinkel-net.com: it is stored in plain text like every other attempt.
+- **Cloudflare block list:** every 6 hours the app puts IPs that tried a password on the honeypot,
+  or asked for 3+ different probe paths, from the last 30 days into the `honeypot_attackers` list. The
+  rule "Block honeypot attackers" blocks them on every hostname except admin (so the honeypot keeps
+  recording them). Never listed: your home IP (so you can try the honeypot), and home/mobile
+  providers (Comcast, Verizon, T-Mobile...: shared IPs a recruiter could be on). IPv6 is listed per
+  /64. The list is replaced each time, so IPs drop off by themselves. Needs the Cloudflare token's
+  Account Filter Lists > Edit permission. To unblock someone, turn the rule off in the dashboard.
+- **Phone notification** (ntfy, same topic as the alerts) when a portfolio page is opened from a
+  network that isn't a home/mobile provider, cloud host or VPN - so probably a company, school or
+  agency - at most once a day per organisation. Put the companies you applied to in `WATCH_ORGS` in
+  `02-logger.yaml` (a regex, e.g. `target|best buy|medtronic`): their visits come with high priority
+  and a star. The skip list is `NOT_A_COMPANY` in the script. Microsoft, Google and Apple aren't
+  skipped (their staff could be visiting), so some of their cloud bots may get through.
 
 ## Alerts
 
@@ -164,6 +225,15 @@ Secret. Routing is under `alertmanager.config` in `files/helm-values/prometheus.
 that are normal on busy Pis with USB disks (disk/system saturation, CPU throttling) are muted there.
 Custom rules are in `files/platform/k3s-alerts.yaml`, including `PrometheusDiskFilling` (over 80%)
 and `PrometheusNotSavingData`. All alerts, muted or not, are listed in Grafana > Alerting > Alert rules.
+
+Also sent to the phone:
+- **A Pi restarted** (`PiRebooted`, k3s-alerts.yaml) - muted 02:55-05:00 Central, when the nightly
+  updates may reboot each Pi at its `reboot_time` (Alertmanager time interval `nightly-updates`).
+- **From the logs** (`files/platform/log-alerts.yaml`, evaluated by Loki): under-voltage, disk or
+  USB errors, out-of-memory kills, and fail2ban bans (with the banned IP).
+- **Database backup failed or older than a day** (`DatabaseBackupFailed`, `DatabaseBackupStale`).
+- **Someone on a company's network opened the portfolio** - sent by the visitor log itself, at most
+  once a day per company; see "Visitor log and honeypot".
 
 ## Disaster recovery
 

@@ -3,6 +3,8 @@
 #   doesn't have (/.env, /wp-login.php...); nginx in the website pod copies them here (website.yaml)
 # - https://admin.hinkel-net.com: a fake admin login (honeypot) served by this app
 # - requests Cloudflare answered itself: www login redirects and Bot Fight Mode blocks
+# - a phone notification (ntfy) when someone on a company's network opens the portfolio
+# - a Cloudflare block list of IPs that tried passwords on the honeypot or probed for files
 # Saved with city, country, reverse-DNS domain and network owner. Visitor IPs are kept 7 days,
 # attacker IPs (probes, honeypot) 90 days. Shown in Grafana's "Visitors & Honeypot" dashboard
 # (files/platform/grafana-dashboard-visitors.yaml).
@@ -19,6 +21,9 @@ data:
     #  :8080  nginx in the portfolio pod mirrors each page view and probe here (files/apps/website.yaml).
     #  :8081  the admin.hinkel-net.com honeypot: a fake admin login that records every request and the
     #         usernames/passwords tried. Nothing behind it is real.
+    #  alerts a phone notification (ntfy) when someone on a company's network opens the portfolio
+    #  blocker every 6 hours, puts IPs that tried passwords on the honeypot or probed for several files
+    #         on a Cloudflare IP list, which a zone rule blocks everywhere except the honeypot
     #  poller requests Cloudflare answered itself (www login redirects, Bot Fight Mode blocks), read
     #         from Cloudflare's GraphQL API every few minutes. Needs CF_API_TOKEN (Analytics Read).
     # Cloudflare adds the visitor's IP (CF-Connecting-IP) and location headers to requests that reach
@@ -36,6 +41,36 @@ data:
     CF_ZONE_ID = os.environ.get("CF_ZONE_ID", "")
     WWW_HOST = os.environ.get("WWW_HOST", "www.hinkel-net.com")
     POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "300"))
+    # Phone notification for portfolio visits from a company's network (ntfy topic URL; empty = off)
+    NTFY_URL = os.environ.get("NTFY_URL", "").split("?", 1)[0]
+    DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "")
+    # Optional: companies you applied to (regex); their visits are sent with high priority
+    WATCH_ORGS = os.environ.get("WATCH_ORGS", "").strip()
+    WATCH = re.compile(WATCH_ORGS, re.I) if WATCH_ORGS else None
+    # Home and mobile internet providers: many people share these IPs (and a recruiter could be one of
+    # them), so their IPs are never put on the Cloudflare block list
+    RESIDENTIAL = (
+        r"comcast|xfinity|verizon|cellco|t-mobile|tmobile|at&t|att-|sbc|bellsouth|charter|spectrum|"
+        r"time warner|cox comm|centurylink|lumen|qwest|frontier|windstream|mediacom|altice|optimum|"
+        r"suddenlink|cablevision|sprint|us cellular|cricket|metropcs|google fiber|starlink|"
+        r"space exploration|wideopenwest|wow!|rcn|astound|grande|wave broadband|metronet|ziply|"
+        r"brightspeed|consolidated comm|tds telecom|sparklight|cable one|hughes|viasat|earthlink|"
+        r"rogers|bell canada|telus|shaw|videotron|cogeco|vodafone|british telecom|sky broadband|"
+        r"virgin media|orange|deutsche telekom|telefonica|movistar|telstra|optus|jio|airtel|bharti|"
+        r"chinanet|china unicom|china mobile")
+    # Cloud, hosting, VPNs and privacy relays
+    HOSTING = (
+        r"amazon|aws|digitalocean|linode|akamai|cloudflare|ovh|hetzner|vultr|choopa|contabo|oracle|"
+        r"alibaba|tencent|leaseweb|m247|datacamp|private relay|icloud|nordvpn|expressvpn|mullvad|"
+        r"proton|surfshark|zscaler|netskope")
+    # Networks that say nothing about who the visitor is. A visit from anything else is probably a
+    # company, school or agency.
+    NOT_A_COMPANY = re.compile(os.environ.get("NOT_A_COMPANY") or f"{RESIDENTIAL}|{HOSTING}", re.I)
+    NEVER_BLOCK_NETWORK = re.compile(RESIDENTIAL, re.I)
+    # Cloudflare IP list the blocker fills (the API token also needs Account Filter Lists: Edit)
+    CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
+    CF_LIST_ID = os.environ.get("CF_LIST_ID", "")
+    BLOCK_DAYS = int(os.environ.get("BLOCK_DAYS", "30"))
 
     BOTS = re.compile(r"bot|crawl|spider|slurp|preview|monitor|uptime|curl|wget|python|go-http|java/|"
                       r"okhttp|headless|scan|fetch|http-client|axios|node", re.I)
@@ -145,6 +180,7 @@ data:
 
     jobs = queue.Queue(maxsize=5000)
     cache = {}  # ip -> (time, hostname, domain, org)
+    notified = {}  # organisation -> time of the last notification (one a day each)
 
 
     def log(*a):
@@ -264,12 +300,39 @@ data:
         return conn
 
 
+    def notify_company_visit(row):
+        if not NTFY_URL or row["site"] != "portfolio" or row["kind"] != "page" or row["bot"]:
+            return
+        who = row["org"] or row["domain"]
+        network = f"{row['org'] or ''} {row['domain'] or ''}"
+        if not who or NOT_A_COMPANY.search(network):
+            return
+        if time.time() - notified.get(who.lower(), 0) < 86400:
+            return
+        notified[who.lower()] = time.time()
+        watched = bool(WATCH and WATCH.search(network))
+        place = ", ".join(p for p in (row["city"], row["region"], row["country"]) if p) or "an unknown place"
+        domain = f" ({row['domain']})" if row["domain"] and row["domain"].split(".")[0] not in who.lower() else ""
+        params = {"title": f"Portfolio visit: {who}", "tags": "star,briefcase" if watched else "briefcase",
+                  "priority": "high" if watched else "default"}
+        if DASHBOARD_URL:
+            params["click"] = DASHBOARD_URL
+        req = urllib.request.Request(NTFY_URL + "?" + urllib.parse.urlencode(params),
+                                     data=f"{who}{domain} opened {row['path']} from {place}".encode())
+        try:
+            urllib.request.urlopen(req, timeout=10).close()
+            log(f"notified: visit from {who}")
+        except Exception as e:
+            log("ntfy notification failed:", e)
+
+
     def writer():
         conn = connect()
         while True:
             row = jobs.get()
             row["hostname"], row["domain"], row["org"] = lookup(row["ip"])
             conn = insert(conn, [row])
+            notify_company_visit(row)
 
 
     def forgetter():
@@ -301,6 +364,74 @@ data:
         if d.get("errors"):
             raise RuntimeError("; ".join(e.get("message", "?") for e in d["errors"]))
         return d["data"]
+
+
+    # Who goes on the block list: tried a password on the honeypot, or asked for at least 3 different
+    # things a real visitor never would (probes, honeypot paths other than the usual browser extras)
+    BLOCK_QUERY = """
+    SELECT host(ip), max(org), bool_or(kind = 'login'),
+           count(DISTINCT path) FILTER (WHERE kind IN ('probe', 'honeypot')
+             AND path !~ '^/(favicon[.]ico|robots[.]txt|apple-touch-icon[^/]*|sitemap[.]xml|[.]well-known/.*)?([?].*)?$')
+    FROM visits
+    WHERE ip IS NOT NULL AND kind IN ('login', 'probe', 'honeypot') AND ts > now() - make_interval(days => %s)
+    GROUP BY ip
+    HAVING bool_or(kind = 'login') OR count(DISTINCT path) FILTER (WHERE kind IN ('probe', 'honeypot')
+             AND path !~ '^/(favicon[.]ico|robots[.]txt|apple-touch-icon[^/]*|sitemap[.]xml|[.]well-known/.*)?([?].*)?$') >= 3
+    ORDER BY max(ts) DESC
+    LIMIT 9500
+    """
+
+
+    def cloudflare_api(method, path, body=None):
+        req = urllib.request.Request(
+            f"https://api.cloudflare.com/client/v4{path}", method=method,
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"Authorization": f"Bearer {CF_API_TOKEN}", "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            d = json.load(r)
+        if not d.get("success", False):
+            raise RuntimeError("; ".join(e.get("message", "?") for e in d.get("errors", [])))
+        return d.get("result")
+
+
+    def home_ip():
+        # The cluster's public IP (your home connection), so you can try the honeypot without
+        # locking yourself out of photos and Home Assistant
+        try:
+            with urllib.request.urlopen("https://1.1.1.1/cdn-cgi/trace", timeout=10) as r:
+                return next((l[3:] for l in r.read().decode().splitlines() if l.startswith("ip=")), None)
+        except Exception:
+            return None
+
+
+    def blocker():
+        if not (CF_API_TOKEN and CF_ACCOUNT_ID and CF_LIST_ID):
+            log("CF_ACCOUNT_ID or CF_LIST_ID not set: not updating the Cloudflare block list")
+            return
+        conn = connect()
+        time.sleep(120)  # let the rest start first
+        while True:
+            try:
+                home = home_ip()
+                items = []
+                for ip, org, tried_login, probes in conn.execute(BLOCK_QUERY, (BLOCK_DAYS,)).fetchall():
+                    addr = ipaddress.ip_address(ip)
+                    if not addr.is_global or ip == home or (org and NEVER_BLOCK_NETWORK.search(org)):
+                        continue
+                    # One IPv6 user usually has a whole /64
+                    entry = str(ipaddress.ip_network(f"{ip}/64", strict=False)) if addr.version == 6 else ip
+                    why = "tried a password on the honeypot" if tried_login else f"probed {probes} paths"
+                    items.append({"ip": entry, "comment": f"{why} ({org or 'unknown network'})"[:500]})
+                unique = list({i["ip"]: i for i in items}.values())
+                cloudflare_api("PUT", f"/accounts/{CF_ACCOUNT_ID}/rules/lists/{CF_LIST_ID}/items", unique)
+                log(f"Cloudflare block list: {len(unique)} IPs")
+            except psycopg.Error as e:
+                log("block list database error:", e)
+                conn.close()
+                conn = connect()
+            except Exception as e:
+                log("updating the Cloudflare block list failed:", e)
+            time.sleep(6 * 3600)
 
 
     def site_of(host):
@@ -423,7 +554,7 @@ data:
         conn = connect()
         conn.execute(SCHEMA)
         conn.close()
-        for target in (writer, forgetter, edge_poller):
+        for target in (writer, forgetter, edge_poller, blocker):
             threading.Thread(target=target, daemon=True).start()
         threading.Thread(target=serve, args=(8081, Honeypot), daemon=True).start()
         log(f"listening on :8080 (portfolio) and :8081 (honeypot); keeping visitor IPs {KEEP_IP_DAYS} days, "
@@ -450,7 +581,7 @@ spec:
         app: visitor-log
       annotations:
         # Bump to restart the pod after changing the script
-        visitor-log/script-version: "2"
+        visitor-log/script-version: "4"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -480,12 +611,26 @@ spec:
               valueFrom: {secretKeyRef: {name: visitor-log-db, key: username}}
             - name: PGPASSWORD
               valueFrom: {secretKeyRef: {name: visitor-log-db, key: password}}
-            # Cloudflare API token (Zone > Analytics > Read) for the edge requests; without it
-            # the rest still works
+            # Cloudflare API token (Zone > Analytics > Read, Account > Account Filter Lists > Edit)
+            # for the edge requests and the block list; without it the rest still works
             - name: CF_API_TOKEN
               valueFrom: {secretKeyRef: {name: visitor-log-cloudflare, key: api-token, optional: true}}
             - name: CF_ZONE_ID
               valueFrom: {secretKeyRef: {name: visitor-log-cloudflare, key: zone-id, optional: true}}
+            # The honeypot_attackers IP list, blocked by the zone rule "Block honeypot attackers"
+            - name: CF_ACCOUNT_ID
+              valueFrom: {secretKeyRef: {name: visitor-log-cloudflare, key: account-id, optional: true}}
+            - name: CF_LIST_ID
+              valueFrom: {secretKeyRef: {name: visitor-log-cloudflare, key: list-id, optional: true}}
+            - {name: BLOCK_DAYS, value: "30"}
+            # Phone notification when someone on a company's network opens the portfolio (the
+            # Alertmanager ntfy topic, from the vault); at most one a day per company
+            - name: NTFY_URL
+              valueFrom: {secretKeyRef: {name: visitor-log-ntfy, key: url, optional: true}}
+            - {name: DASHBOARD_URL, value: "https://grafana.lan.hinkel-net.com/d/portfolio-visitors"}
+            # Companies you applied to, as a regex (e.g. "target|best buy|medtronic"): their visits
+            # come with high priority and a star
+            - {name: WATCH_ORGS, value: ""}
           ports:
             - {name: mirror, containerPort: 8080}
             - {name: honeypot, containerPort: 8081}

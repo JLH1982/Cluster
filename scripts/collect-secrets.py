@@ -31,6 +31,7 @@ out = {
     "vault_authentik_secrets": secret("authentik", "authentik-secrets"),
     "vault_visitor_log_db_password": secret("visitor-log", "visitor-log-db")["password"],
     "vault_visitor_log_grafana_db_password": secret("visitor-log", "visitor-log-grafana")["password"],
+    "vault_db_backup_passphrase": secret("db-backup", "db-backup-passphrase")["passphrase"],
 }
 # Optional: only there if a Cloudflare token was entered in new-visitor-log-secrets.yml
 try:

@@ -10,6 +10,41 @@ metadata:
     release: prometheus
 spec:
   groups:
+    - name: pi-reboots
+      rules:
+        # A Pi started up again. The boot time can shift by a second when the clock syncs, so only
+        # a jump of over a minute counts. Muted during the nightly update reboots (03:00-04:30,
+        # see reboot_time in host_vars) by Alertmanager's "nightly-updates" time interval.
+        - alert: PiRebooted
+          expr: |
+            (node_boot_time_seconds - min_over_time(node_boot_time_seconds[30m]) > 60)
+              * on (instance) group_left (nodename) node_uname_info
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.nodename }} restarted"
+            description: "Outside the nightly update window, so unexpected: a crash, a power problem or a manual reboot. See Grafana > Cluster Problems."
+
+    - name: backups
+      rules:
+        # files/apps/db-backup.yaml (Authentik and visitor log databases to S3)
+        - alert: DatabaseBackupFailed
+          expr: kube_job_status_failed{namespace="db-backup"} > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Database backup to S3 failed"
+            description: "Job {{ $labels.job_name }} failed. Check: kubectl -n db-backup logs job/{{ $labels.job_name }} --all-containers"
+
+        - alert: DatabaseBackupStale
+          expr: time() - kube_cronjob_status_last_successful_time{namespace="db-backup", cronjob="db-backup"} > 26 * 3600
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "No database backup to S3 for over a day"
+            description: "The nightly db-backup job hasn't succeeded since {{ $value | humanizeDuration }} ago."
+
     - name: k3s-cluster-health
       rules:
         # Alert when a K3s node becomes unreachable

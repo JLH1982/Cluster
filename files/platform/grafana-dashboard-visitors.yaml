@@ -23,7 +23,7 @@ data:
       "timezone": "America/Chicago",
       "editable": true,
       "schemaVersion": 39,
-      "version": 2,
+      "version": 3,
       "time": {
         "from": "now-30d",
         "to": "now"
@@ -335,12 +335,12 @@ data:
         {
           "id": 5,
           "type": "geomap",
-          "title": "Where requests come from",
+          "title": "🔵 Portfolio visitors   🔴 Honeypot (admin)   🟣 Portfolio probes   🟢 www login page   🟠 Blocked by Cloudflare",
           "datasource": {
             "type": "grafana-postgresql-datasource",
             "uid": "portfolio-visitors"
           },
-          "description": "Blue: one dot per city (requests that reached the cluster: portfolio and honeypot). Orange: one dot per country (requests Cloudflare answered itself: the www login page and blocked bots; Cloudflare gives no city for those). Bigger dots had more requests; the number shows when more than one.",
+          "description": "One colour per source; turn sources on and off with the Source dropdown above. Portfolio and honeypot dots are cities. www and blocked dots are countries, because Cloudflare gives no city for requests it answers itself. Bigger dots had more requests; the number shows when more than one.",
           "gridPos": {
             "h": 15,
             "w": 24,
@@ -349,7 +349,7 @@ data:
           },
           "targets": [
             {
-              "refId": "A",
+              "refId": "blocked",
               "datasource": {
                 "type": "grafana-postgresql-datasource",
                 "uid": "portfolio-visitors"
@@ -357,10 +357,10 @@ data:
               "format": "table",
               "rawQuery": true,
               "editorMode": "code",
-              "rawSql": "SELECT city, region, country, lat AS latitude, lon AS longitude, sum(hits) AS requests,\n  string_agg(DISTINCT source, ', ') AS sources, CASE WHEN sum(hits) > 1 THEN sum(hits)::text ELSE '' END AS label\nFROM visit_sources WHERE kind <> 'edge' AND lat IS NOT NULL AND $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY city, region, country, lat, lon"
+              "rawSql": "SELECT country, sum(hits) AS requests, 'Blocked by Cloudflare' AS source, CASE WHEN sum(hits) > 1 THEN sum(hits)::text ELSE '' END AS label\nFROM visit_sources WHERE source = 'blocked' AND 'blocked' IN (${source:sqlstring})\n  AND country IS NOT NULL AND $__timeFilter(ts) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY country"
             },
             {
-              "refId": "B",
+              "refId": "www",
               "datasource": {
                 "type": "grafana-postgresql-datasource",
                 "uid": "portfolio-visitors"
@@ -368,7 +368,40 @@ data:
               "format": "table",
               "rawQuery": true,
               "editorMode": "code",
-              "rawSql": "SELECT country, sum(hits) AS requests, string_agg(DISTINCT source, ', ') AS sources, CASE WHEN sum(hits) > 1 THEN sum(hits)::text ELSE '' END AS label\nFROM visit_sources WHERE kind = 'edge' AND country IS NOT NULL AND $__timeFilter(ts) AND source IN (${source:sqlstring}) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY country"
+              "rawSql": "SELECT country, sum(hits) AS requests, 'www login page' AS source, CASE WHEN sum(hits) > 1 THEN sum(hits)::text ELSE '' END AS label\nFROM visit_sources WHERE source = 'www' AND 'www' IN (${source:sqlstring})\n  AND country IS NOT NULL AND $__timeFilter(ts) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY country"
+            },
+            {
+              "refId": "probes",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT city, region, country, lat AS latitude, lon AS longitude, sum(hits) AS requests, 'Portfolio probes' AS source, CASE WHEN sum(hits) > 1 THEN sum(hits)::text ELSE '' END AS label\nFROM visit_sources WHERE source = 'probes' AND 'probes' IN (${source:sqlstring})\n  AND lat IS NOT NULL AND $__timeFilter(ts) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY city, region, country, lat, lon"
+            },
+            {
+              "refId": "honeypot",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT city, region, country, lat AS latitude, lon AS longitude, sum(hits) AS requests, 'Honeypot (admin)' AS source, CASE WHEN sum(hits) > 1 THEN sum(hits)::text ELSE '' END AS label\nFROM visit_sources WHERE source = 'honeypot' AND 'honeypot' IN (${source:sqlstring})\n  AND lat IS NOT NULL AND $__timeFilter(ts) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY city, region, country, lat, lon"
+            },
+            {
+              "refId": "portfolio",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "portfolio-visitors"
+              },
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT city, region, country, lat AS latitude, lon AS longitude, sum(hits) AS requests, 'Portfolio visitors' AS source, CASE WHEN sum(hits) > 1 THEN sum(hits)::text ELSE '' END AS label\nFROM visit_sources WHERE source = 'portfolio' AND 'portfolio' IN (${source:sqlstring})\n  AND lat IS NOT NULL AND $__timeFilter(ts) AND (${bots} OR NOT bot OR source <> 'portfolio') AND concat_ws(' ', org, domain, hostname, city, region, country, path, username) ILIKE '%' || ${search:sqlstring} || '%'\nGROUP BY city, region, country, lat, lon"
             }
           ],
           "fieldConfig": {
@@ -404,7 +437,7 @@ data:
             "layers": [
               {
                 "type": "markers",
-                "name": "Countries (Cloudflare)",
+                "name": "Blocked by Cloudflare",
                 "tooltip": true,
                 "location": {
                   "mode": "lookup",
@@ -413,7 +446,7 @@ data:
                 },
                 "filterData": {
                   "id": "byRefId",
-                  "options": "B"
+                  "options": "blocked"
                 },
                 "config": {
                   "showLegend": false,
@@ -441,7 +474,7 @@ data:
               },
               {
                 "type": "markers",
-                "name": "Country counts",
+                "name": "Blocked by Cloudflare (counts)",
                 "tooltip": false,
                 "location": {
                   "mode": "lookup",
@@ -450,7 +483,7 @@ data:
                 },
                 "filterData": {
                   "id": "byRefId",
-                  "options": "B"
+                  "options": "blocked"
                 },
                 "config": {
                   "showLegend": false,
@@ -483,7 +516,86 @@ data:
               },
               {
                 "type": "markers",
-                "name": "Cities",
+                "name": "www login page",
+                "tooltip": true,
+                "location": {
+                  "mode": "lookup",
+                  "lookup": "country",
+                  "gazetteer": "public/gazetteer/countries.json"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "www"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": "img/icons/marker/circle.svg"
+                    },
+                    "symbolAlign": {
+                      "horizontal": "center",
+                      "vertical": "center"
+                    },
+                    "color": {
+                      "fixed": "green"
+                    },
+                    "opacity": 0.85,
+                    "size": {
+                      "field": "requests",
+                      "fixed": 9,
+                      "min": 9,
+                      "max": 24
+                    }
+                  }
+                }
+              },
+              {
+                "type": "markers",
+                "name": "www login page (counts)",
+                "tooltip": false,
+                "location": {
+                  "mode": "lookup",
+                  "lookup": "country",
+                  "gazetteer": "public/gazetteer/countries.json"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "www"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": ""
+                    },
+                    "color": {
+                      "fixed": "white"
+                    },
+                    "opacity": 1,
+                    "size": {
+                      "fixed": 9
+                    },
+                    "text": {
+                      "mode": "field",
+                      "field": "label",
+                      "fixed": ""
+                    },
+                    "textConfig": {
+                      "fontSize": 11,
+                      "textAlign": "center",
+                      "textBaseline": "middle",
+                      "offsetX": 0,
+                      "offsetY": 0
+                    }
+                  }
+                }
+              },
+              {
+                "type": "markers",
+                "name": "Portfolio probes",
                 "tooltip": true,
                 "location": {
                   "mode": "coords",
@@ -492,7 +604,165 @@ data:
                 },
                 "filterData": {
                   "id": "byRefId",
-                  "options": "A"
+                  "options": "probes"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": "img/icons/marker/circle.svg"
+                    },
+                    "symbolAlign": {
+                      "horizontal": "center",
+                      "vertical": "center"
+                    },
+                    "color": {
+                      "fixed": "purple"
+                    },
+                    "opacity": 0.85,
+                    "size": {
+                      "field": "requests",
+                      "fixed": 9,
+                      "min": 9,
+                      "max": 24
+                    }
+                  }
+                }
+              },
+              {
+                "type": "markers",
+                "name": "Portfolio probes (counts)",
+                "tooltip": false,
+                "location": {
+                  "mode": "coords",
+                  "latitude": "latitude",
+                  "longitude": "longitude"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "probes"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": ""
+                    },
+                    "color": {
+                      "fixed": "white"
+                    },
+                    "opacity": 1,
+                    "size": {
+                      "fixed": 9
+                    },
+                    "text": {
+                      "mode": "field",
+                      "field": "label",
+                      "fixed": ""
+                    },
+                    "textConfig": {
+                      "fontSize": 11,
+                      "textAlign": "center",
+                      "textBaseline": "middle",
+                      "offsetX": 0,
+                      "offsetY": 0
+                    }
+                  }
+                }
+              },
+              {
+                "type": "markers",
+                "name": "Honeypot (admin)",
+                "tooltip": true,
+                "location": {
+                  "mode": "coords",
+                  "latitude": "latitude",
+                  "longitude": "longitude"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "honeypot"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": "img/icons/marker/circle.svg"
+                    },
+                    "symbolAlign": {
+                      "horizontal": "center",
+                      "vertical": "center"
+                    },
+                    "color": {
+                      "fixed": "red"
+                    },
+                    "opacity": 0.85,
+                    "size": {
+                      "field": "requests",
+                      "fixed": 9,
+                      "min": 9,
+                      "max": 24
+                    }
+                  }
+                }
+              },
+              {
+                "type": "markers",
+                "name": "Honeypot (admin) (counts)",
+                "tooltip": false,
+                "location": {
+                  "mode": "coords",
+                  "latitude": "latitude",
+                  "longitude": "longitude"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "honeypot"
+                },
+                "config": {
+                  "showLegend": false,
+                  "style": {
+                    "symbol": {
+                      "mode": "fixed",
+                      "fixed": ""
+                    },
+                    "color": {
+                      "fixed": "white"
+                    },
+                    "opacity": 1,
+                    "size": {
+                      "fixed": 9
+                    },
+                    "text": {
+                      "mode": "field",
+                      "field": "label",
+                      "fixed": ""
+                    },
+                    "textConfig": {
+                      "fontSize": 11,
+                      "textAlign": "center",
+                      "textBaseline": "middle",
+                      "offsetX": 0,
+                      "offsetY": 0
+                    }
+                  }
+                }
+              },
+              {
+                "type": "markers",
+                "name": "Portfolio visitors",
+                "tooltip": true,
+                "location": {
+                  "mode": "coords",
+                  "latitude": "latitude",
+                  "longitude": "longitude"
+                },
+                "filterData": {
+                  "id": "byRefId",
+                  "options": "portfolio"
                 },
                 "config": {
                   "showLegend": false,
@@ -520,7 +790,7 @@ data:
               },
               {
                 "type": "markers",
-                "name": "City counts",
+                "name": "Portfolio visitors (counts)",
                 "tooltip": false,
                 "location": {
                   "mode": "coords",
@@ -529,7 +799,7 @@ data:
                 },
                 "filterData": {
                   "id": "byRefId",
-                  "options": "A"
+                  "options": "portfolio"
                 },
                 "config": {
                   "showLegend": false,

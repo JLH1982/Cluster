@@ -1,0 +1,84 @@
+# Loki: stores the cluster's problem logs (warnings and errors from the Pis, k3s, fail2ban and pods,
+# collected by Alloy, see alloy.yaml) for Grafana's "Cluster Problems" dashboard. One small instance
+# with its data on a Longhorn volume; logs are kept 30 days. Its ruler turns log lines into alerts
+# (files/platform/log-alerts.yaml) sent to Alertmanager, so they reach the phone through ntfy.
+deploymentMode: SingleBinary
+
+loki:
+  # One tenant (no login inside the cluster; not reachable from outside it)
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2026-10-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  limits_config:
+    retention_period: 720h   # 30 days
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+    working_directory: /var/loki/compactor
+  analytics:
+    reporting_enabled: false
+  # Alert rules come from ConfigMaps labelled loki_rule (the sidecar below writes them to
+  # /rules/fake: "fake" is Loki's tenant name when auth is off)
+  rulerConfig:
+    alertmanager_url: http://prometheus-kube-prometheus-alertmanager.monitoring.svc:9093
+    enable_api: true
+    rule_path: /var/loki/rules-temp
+    storage:
+      type: local
+      local:
+        directory: /rules
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests: {cpu: 50m, memory: 192Mi}
+    limits: {memory: 768Mi}
+  # Not on node1 (it heat-throttles)
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - {key: kubernetes.io/hostname, operator: NotIn, values: [node1]}
+  persistence:
+    enabled: true
+    storageClass: longhorn
+    size: 5Gi
+    # Keep the logs if the release is ever removed or scaled down
+    enableStatefulSetAutoDeletePVC: false
+    whenDeleted: Retain
+    whenScaled: Retain
+
+# The chart's scalable and caching parts aren't needed for one small instance (the caches alone
+# would ask for 8GB of memory each)
+read: {replicas: 0}
+write: {replicas: 0}
+backend: {replicas: 0}
+chunksCache: {enabled: false}
+resultsCache: {enabled: false}
+gateway: {enabled: false}
+lokiCanary: {enabled: false}
+test: {enabled: false}
+sidecar:
+  rules:
+    enabled: true
+    folder: /rules/fake
+  resources:
+    requests: {cpu: 5m, memory: 48Mi}
+    limits: {memory: 128Mi}
+# The rules sidecar only reads ConfigMaps in the logging namespace (not every namespace's Secrets)
+rbac:
+  namespaced: true

@@ -1,4 +1,4 @@
-# Apps: Cloudflare tunnel, Authentik, portfolio website + visitor log, onion site, Immich, Home Assistant, Uptime Kuma, homepage, UniFi Poller.
+# Apps: Cloudflare tunnel, Authentik, portfolio website + visitor log, database backups, onion site, Immich, Home Assistant, Uptime Kuma, homepage, UniFi Poller, pool supply page.
 # Secrets come from the vault. App data (photos, configs, site files) is restored separately
 # with playbooks/restore-data.yml.
 - name: Apps
@@ -130,6 +130,18 @@
           metadata: {name: visitor-log-cloudflare, namespace: visitor-log}
           stringData: "{{ vault_visitor_log_cloudflare }}"
       when: vault_visitor_log_cloudflare is defined
+
+    # The Alertmanager ntfy topic, for "someone from a company opened the portfolio" notifications
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: visitor-log-ntfy
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: visitor-log-ntfy, namespace: visitor-log}
+          stringData: "{{ vault_alertmanager_ntfy }}"
 
     - name: Wait for the visitor log database
       ansible.builtin.command: >-
@@ -303,3 +315,27 @@
     # ---- Homepage (www.hinkel-net.com) ----
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars: {src: apps/homepage.yaml}
+
+    # ---- Pool supply catalog (pool.hinkel-net.com, a static sample page) ----
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/pool.yaml}
+
+    # ---- Database backups to S3 (Authentik and the visitor log; Immich backs up its own) ----
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars:
+        secret_name: db-backup
+        content: "{{ _secret | to_nice_yaml }}"
+        _secret:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata: {name: db-backup, namespace: db-backup}
+          # The photo backup's S3 key (same bucket, folder db-dumps/), without its Uptime Kuma URL
+          stringData: >-
+            {{ vault_immich_s3_backup | dict2items | rejectattr('key', 'equalto', 'KUMA_PUSH_URL') | items2dict
+               | combine({'AUTHENTIK_DB_PASSWORD': vault_authentik_db_password,
+                          'VISITORLOG_DB_PASSWORD': vault_visitor_log_db_password,
+                          'BACKUP_PASSPHRASE': vault_db_backup_passphrase}) }}
+
+    - ansible.builtin.include_tasks: tasks/kube-apply.yml
+      vars: {src: apps/db-backup.yaml}

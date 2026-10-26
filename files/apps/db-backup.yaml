@@ -1,0 +1,98 @@
+# Nightly off-site copy of the databases that only live in the cluster: Authentik (users, MFA
+# devices) and the visitor log. Dumped with pg_dump, encrypted by rclone (passphrase in the vault)
+# and uploaded to the S3 photo-backup bucket, folder db-dumps/. Each night overwrites the last; the
+# bucket is versioned, so the previous 90 nights stay recoverable. (Immich makes its own nightly
+# database dump, which the immich-s3-backup job already copies.)
+# Secrets: the db-backup secret, made by 04-apps.yml from the vault. Failures alert through
+# Prometheus (DatabaseBackupFailed / DatabaseBackupStale in files/platform/k3s-alerts.yaml).
+# Run now:  kubectl -n db-backup create job --from=cronjob/db-backup db-backup-manual
+# Restore:  README "Database backups to S3"
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: db-backup
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-backup
+  namespace: db-backup
+spec:
+  schedule: "15 2 * * *"          # before the nightly update reboots (03:00) and the photo backup (03:30)
+  timeZone: America/Chicago
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 604800
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 26          # postgres in the CloudNativePG images
+            runAsGroup: 26
+            fsGroup: 26
+          initContainers:
+            # Same image as the Immich database (Postgres 18), so pg_dump is at least as new as
+            # every database it dumps. Connects as each database's owner.
+            - name: dump
+              image: ghcr.io/tensorchord/cloudnative-vectorchord:18.4
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  dump() {  # database host user password
+                    PGPASSWORD="$4" pg_dump -Fc -h "$2" -U "$3" -d "$1" -f "/dumps/$1.dump.tmp"
+                    mv "/dumps/$1.dump.tmp" "/dumps/$1.dump"
+                    echo "$1: $(du -h "/dumps/$1.dump" | cut -f1)"
+                  }
+                  dump authentik authentik-database-rw.authentik.svc authentik "$AUTHENTIK_DB_PASSWORD"
+                  dump visitorlog visitor-log-database-rw.visitor-log.svc visitorlog "$VISITORLOG_DB_PASSWORD"
+              env:
+                - {name: PGSSLMODE, value: require}
+                - name: AUTHENTIK_DB_PASSWORD
+                  valueFrom: {secretKeyRef: {name: db-backup, key: AUTHENTIK_DB_PASSWORD}}
+                - name: VISITORLOG_DB_PASSWORD
+                  valueFrom: {secretKeyRef: {name: db-backup, key: VISITORLOG_DB_PASSWORD}}
+              volumeMounts:
+                - {name: dumps, mountPath: /dumps}
+              resources:
+                requests: {cpu: 50m, memory: 64Mi}
+                limits: {memory: 512Mi}
+          containers:
+            # rclone's crypt backend encrypts each file (names stay readable, with .bin added)
+            - name: upload
+              image: rclone/rclone:1.75.1
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  export RCLONE_CRYPT_PASSWORD="$(rclone obscure "$BACKUP_PASSPHRASE")"
+                  rclone copy /dumps :crypt: --stats-one-line -v
+                  echo "Database backup uploaded"
+              env:
+                - {name: HOME, value: /tmp}
+                - {name: RCLONE_CONFIG, value: /tmp/rclone.conf}
+                - {name: RCLONE_CRYPT_REMOTE, value: ":s3,provider=AWS,env_auth=true,region=us-east-2,no_check_bucket=true:<your-immich-backup-bucket>/db-dumps"}
+                - {name: RCLONE_CRYPT_FILENAME_ENCRYPTION, value: "off"}
+                - {name: RCLONE_CRYPT_DIRECTORY_NAME_ENCRYPTION, value: "false"}
+                - name: BACKUP_PASSPHRASE
+                  valueFrom: {secretKeyRef: {name: db-backup, key: BACKUP_PASSPHRASE}}
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom: {secretKeyRef: {name: db-backup, key: AWS_ACCESS_KEY_ID}}
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom: {secretKeyRef: {name: db-backup, key: AWS_SECRET_ACCESS_KEY}}
+              volumeMounts:
+                - {name: dumps, mountPath: /dumps, readOnly: true}
+                - {name: tmp, mountPath: /tmp}
+              resources:
+                requests: {cpu: 20m, memory: 32Mi}
+                limits: {memory: 256Mi}
+          volumes:
+            - name: dumps
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}

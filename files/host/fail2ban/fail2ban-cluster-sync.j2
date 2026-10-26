@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+# Managed by Ansible (01-hosts.yml). Shares fail2ban bans between the Pis: every minute, bans on this
+# Pi any IP that fail2ban banned on another Pi in the last 2 minutes. The bans are read from Loki
+# (Grafana's problem logs, see files/helm-values/alloy.yaml), at its fixed in-cluster address.
+# The window is shorter than fail2ban's ban time, so shared bans don't keep renewing each other.
+import json, re, socket, subprocess, sys, time, urllib.parse, urllib.request
+
+LOKI = "http://{{ loki_service_ip }}:3100"
+WINDOW = 120
+NEVER_BAN = set("127.0.0.1 {{ fail2ban_ignore_ips | join(' ') }}".split())
+
+me = socket.gethostname()
+now = time.time()
+params = urllib.parse.urlencode({
+    "query": '{unit="fail2ban.service", node!="%s"} |= "] Ban "' % me,
+    "start": int((now - WINDOW) * 1e9), "end": int(now * 1e9), "limit": 1000})
+try:
+    with urllib.request.urlopen(f"{LOKI}/loki/api/v1/query_range?{params}", timeout=10) as r:
+        streams = json.load(r)["data"]["result"]
+except Exception as e:
+    print(f"Loki not reachable, nothing shared this time: {e}")
+    sys.exit(0)
+
+ips = {m for s in streams for _, line in s["values"] for m in re.findall(r"\] Ban ([0-9a-fA-F.:]+)", line)}
+ips -= NEVER_BAN
+if not ips:
+    sys.exit(0)
+banned = set(subprocess.run(["fail2ban-client", "get", "sshd", "banip"],
+                            capture_output=True, text=True).stdout.split())
+for ip in sorted(ips - banned):
+    subprocess.run(["fail2ban-client", "set", "sshd", "banip", ip], check=False, capture_output=True)
+    print(f"banned {ip}: banned on another Pi")

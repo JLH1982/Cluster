@@ -7,6 +7,10 @@ alertmanager:
       receiver: ntfy
       group_by: [alertname, namespace]
       routes:
+      # Planned reboots after nightly updates aren't news (k3s-alerts.yaml)
+      - receiver: ntfy
+        matchers: ['alertname = "PiRebooted"']
+        mute_time_intervals: [nightly-updates]
       - receiver: "null"
         matchers: ['alertname =~ "Watchdog|InfoInhibitor"']
       # Normal for busy Pis on USB disks; still visible in Grafana / Alertmanager
@@ -14,6 +18,12 @@ alertmanager:
         matchers: ['alertname =~ "NodeDiskIOSaturation|NodeSystemSaturation|CPUThrottlingHigh"']
       - receiver: "null"
         matchers: ['severity !~ "critical|warning"']
+    # Unattended-upgrades may reboot each Pi at its reboot_time (03:00-04:30, host_vars)
+    time_intervals:
+    - name: nightly-updates
+      time_intervals:
+      - times: [{start_time: "02:55", end_time: "05:00"}]
+        location: America/Chicago
     receivers:
     - name: "null"
     - name: ntfy
@@ -51,8 +61,15 @@ grafana:
       secretKeyRef:
         name: visitor-log-grafana
         key: password
-  # Portfolio visitor log, for the "Portfolio Visitors" dashboard (grafana-dashboard-visitors.yaml)
   additionalDataSources:
+  # Problem logs from Loki (helm-values/loki.yaml), for the "Cluster Problems" dashboard
+  - name: Loki
+    uid: loki
+    type: loki
+    url: http://loki.logging.svc:3100
+    jsonData:
+      maxLines: 5000
+  # Portfolio visitor log, for the "Visitors & Honeypot" dashboard (grafana-dashboard-visitors.yaml)
   - name: Portfolio visitors
     uid: portfolio-visitors
     type: grafana-postgresql-datasource
