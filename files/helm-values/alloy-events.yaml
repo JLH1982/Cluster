@@ -24,7 +24,7 @@ alloy:
 
         // Normal events are routine (pulled, created, started...), except a node going away or coming back
         stage.match {
-          selector            = "{source=\"events\"} |= `type=Normal` !~ `reason=(NodeNotReady|NodeReady|Rebooted|Starting|NodeHasDiskPressure|NodeHasMemoryPressure|NodeHasInsufficientMemory|RemovingNode)`"
+          selector            = "{source=\"events\"} |= \"type=Normal\" !~ \"reason=(NodeNotReady|NodeReady|Rebooted|Starting|NodeHasDiskPressure|NodeHasMemoryPressure|NodeHasInsufficientMemory|RemovingNode)\""
           action              = "drop"
           drop_counter_reason = "routine_event"
         }

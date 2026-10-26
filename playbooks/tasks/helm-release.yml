@@ -14,7 +14,7 @@
 - name: "Read deployed state of {{ release }}"
   ansible.builtin.shell: |
     helm list -n {{ ns }} -f '^{{ release }}$' -o json
-    echo '---'
+    echo '#### helm-state-separator ####'
     helm get values {{ release }} -n {{ ns }} -o json 2>/dev/null || echo null
   environment:
     KUBECONFIG: "{{ kubeconfig }}"
@@ -32,7 +32,7 @@
          or ((_live or {}) != _desired) }}
   vars:
     _chart: "{{ chart | basename }}"
-    _parts: "{{ helm_state.stdout.split('---') }}"
+    _parts: "{{ helm_state.stdout.split('#### helm-state-separator ####') }}"
     _listed: "{{ _parts[0] | from_json }}"
     _live: "{{ _parts[1] | trim | from_json }}"
     _file: "{{ values_dict if values_dict is defined else ((lookup('file', '../files/' ~ values) | from_yaml) if values is defined else {}) }}"

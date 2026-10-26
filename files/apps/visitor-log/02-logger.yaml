@@ -148,9 +148,8 @@ data:
             datetime_geq: $from, datetime_lt: $to, originResponseStatus: 0,
             OR: [{clientRequestHTTPHost: $www}, {edgeResponseStatus_in: [403, 429, 503]}]}) {
           count
-          dimensions { datetimeMinute clientRequestHTTPHost clientIP clientCountryName clientAsn
-                       clientASNDescription clientRequestHTTPMethodName clientRequestPath
-                       edgeResponseStatus userAgent }
+          dimensions { datetimeMinute clientRequestHTTPHost clientIP clientCountryName
+                       clientRequestHTTPMethodName clientRequestPath edgeResponseStatus userAgent }
         }
       } }
     }"""
@@ -464,10 +463,12 @@ data:
                         r = dict.fromkeys(COLUMNS)
                         r.update(ts=datetime.fromisoformat(d["datetimeMinute"].replace("Z", "+00:00")), site=site_of(d.get("clientRequestHTTPHost")), kind="edge",
                                  ip=d.get("clientIP") or None, country=d.get("clientCountryName") or None,
-                                 asn=d.get("clientAsn") or None, org=d.get("clientASNDescription") or None,
                                  method=d.get("clientRequestHTTPMethodName"), path=(d.get("clientRequestPath") or "")[:1000],
                                  status=d.get("edgeResponseStatus"), hits=max(1, int(g["count"])),
                                  user_agent=ua and ua[:500], bot=is_bot(ua))
+                        # The free plan has no clientAsn/clientASNDescription; use RDAP like the portfolio rows
+                        if r["ip"]:
+                            r["hostname"], r["domain"], r["org"] = lookup(r["ip"])
                         rows.append(r)
                     if rows:
                         conn = insert(conn, rows)

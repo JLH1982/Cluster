@@ -59,19 +59,19 @@ alloy:
           }
         }
         stage.match {
-          selector = "{unit=~\"k3s.*\"} |~ `^E[0-9]{4} `"
+          selector = "{unit=~\"k3s.*\"} |~ \"^E[0-9]{4} \""
           stage.static_labels {
             values = {level = "error"}
           }
         }
         stage.match {
-          selector = "{unit=~\"k3s.*\"} |~ `^W[0-9]{4} `"
+          selector = "{unit=~\"k3s.*\"} |~ \"^W[0-9]{4} \""
           stage.static_labels {
             values = {level = "warning"}
           }
         }
         stage.match {
-          selector = "{unit=~\"k3s.*\"} |~ `^F[0-9]{4} `"
+          selector = "{unit=~\"k3s.*\"} |~ \"^F[0-9]{4} \""
           stage.static_labels {
             values = {level = "fatal"}
           }
@@ -81,7 +81,7 @@ alloy:
         // trouble - power, heat, USB/disk resets and errors, out of memory, failed SSH logins, boots and
         // shutdowns, etcd leader changes and slow disk writes.
         stage.match {
-          selector            = "{source=\"journal\", level=~\"notice|info|debug|\", unit!=\"fail2ban.service\"} !~ `(?i)(under-?voltage|throttl|thermal|over-?temp|reset (high|super|full|low)[ -]?speed|usb [0-9-.]+: (usb )?disconnect|i/o error|ext4-fs (error|warning)|nvme.*(timeout|reset|abort)|out of memory|oom-kill|killed process|watchdog|failed password|invalid user|authentication failure|booting linux|system is (rebooting|powering down)|reached target.*(reboot|power-off|shutdown)|unattended-upgrade.*reboot|leader changed|elected leader|apply request took too long|slow fdatasync)`"
+          selector            = "{source=\"journal\", level=~\"notice|info|debug|\", unit!=\"fail2ban.service\"} !~ \"(?i)(under-?voltage|throttl|thermal|over-?temp|reset (high|super|full|low)[ -]?speed|usb [0-9-.]+: (usb )?disconnect|i/o error|ext4-fs (error|warning)|nvme.*(timeout|reset|abort)|out of memory|oom-kill|killed process|watchdog|failed password|invalid user|authentication failure|booting linux|system is (rebooting|powering down)|reached target.*(reboot|power-off|shutdown)|unattended-upgrade.*reboot|leader changed|elected leader|apply request took too long|slow fdatasync)\""
           action              = "drop"
           drop_counter_reason = "not_a_problem"
         }
@@ -156,7 +156,7 @@ alloy:
         // Keep only lines that look like errors or warnings (levels, upper-case words, Kubernetes'
         // E0102-style prefixes, stack traces)
         stage.match {
-          selector            = "{source=\"pod\"} !~ `((?i:level\"?[=:] ?\"?(error|err|warn|warning|fatal|panic|crit|critical)[\" ,])|(^|[^A-Za-z])(ERROR|FATAL|PANIC|CRITICAL|WARN|WARNING)([^A-Za-z]|$)|^[EWF][0-9]{4} |Traceback|Exception|panic:|OOMKilled)`"
+          selector            = "{source=\"pod\"} !~ \"((?i:level\\\"?[=:] ?\\\"?(error|err|warn|warning|fatal|panic|crit|critical)[\\\" ,])|(^|[^A-Za-z])(ERROR|FATAL|PANIC|CRITICAL|WARN|WARNING)([^A-Za-z]|$)|^[EWF][0-9]{4} |Traceback|Exception|panic:|OOMKilled)\""
           action              = "drop"
           drop_counter_reason = "not_a_problem"
         }

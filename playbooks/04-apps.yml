@@ -12,7 +12,7 @@
         path: "{{ config_dir }}/{{ item }}"
         state: directory
         mode: "0755"
-      loop: [apps, apps/immich, apps/authentik]
+      loop: [apps, apps/immich, apps/authentik, apps/visitor-log]
       check_mode: false
 
     # ---- Cloudflare tunnel ----
@@ -152,6 +152,13 @@
 
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars: {src: apps/visitor-log/02-logger.yaml}
+
+    # The script is in a ConfigMap, which the running pod doesn't reload by itself
+    - name: Restart the visitor log after a script change
+      ansible.builtin.command: kubectl -n visitor-log rollout restart deploy/visitor-log
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      when: kdiff.rc == 1 and 'ConfigMap' in kdiff.stdout
 
     - ansible.builtin.include_tasks: tasks/kube-apply.yml
       vars: {src: apps/darkweb.yaml}
