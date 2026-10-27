@@ -150,6 +150,11 @@ data:
           <div class="desc">UniFi Cloud Gateway Fiber</div>
           <div class="url">10.0.20.1</div>
         </a>
+        <a class="card" href="http://10.0.20.249">
+          <div class="name"><span class="icon">🔌</span>Cluster switch<span class="badge">home</span></div>
+          <div class="desc">Netgear GS305EPP: ports, PoE, VLANs</div>
+          <div class="url">10.0.20.249</div>
+        </a>
       </div>
 
       <h2>Cloud dashboards</h2>
@@ -184,6 +189,7 @@ data:
           <tr><td>node1</td><td><code>10.0.20.241</code></td><td>k3s agent, Longhorn disk</td></tr>
           <tr><td>node2</td><td><code>10.0.20.242</code></td><td>k3s server</td></tr>
           <tr><td>node3</td><td><code>10.0.20.243</code></td><td>k3s server, Z-Wave stick</td></tr>
+          <tr><td>switch</td><td><code>10.0.20.249</code></td><td>Netgear GS305EPP, PoE+ to all four Pis</td></tr>
         </table>
       </div>
 
