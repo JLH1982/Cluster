@@ -40,7 +40,9 @@ server:
       enabled: true
       className: traefik
       annotations:
-        traefik.ingress.kubernetes.io/router.entrypoints: web
+        # web: the Cloudflare tunnel (photos.hinkel-net.com); websecure: https on photos.lan
+        # (no redirect to https: the tunnel connects over plain http)
+        traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
       hosts:
         - host: photos.hinkel-net.com
           paths:

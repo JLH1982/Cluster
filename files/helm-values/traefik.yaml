@@ -4,6 +4,17 @@ service:
     metallb.io/loadBalancerIPs: 10.0.20.230
 # HTTPS certificate for every host: the *.lan.hinkel-net.com wildcard from
 # files/platform/lan-certificate.yaml (Traefik's self-signed one until it is issued)
+# No 60-second limit on reading a request (Traefik v3's default), so large Immich video
+# uploads don't get cut off part way
+ports:
+  web:
+    transport:
+      respondingTimeouts:
+        readTimeout: 0
+  websecure:
+    transport:
+      respondingTimeouts:
+        readTimeout: 0
 tlsStore:
   default:
     defaultCertificate:

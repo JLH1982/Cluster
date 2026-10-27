@@ -69,6 +69,8 @@ data:
       tr:last-child td { border-bottom: 0; }
       .scroll { overflow-x: auto; }
       code { font-size: 13px; }
+      td a { color: var(--accent); text-decoration: none; }
+      td a:hover { text-decoration: underline; }
       footer { margin-top: 36px; color: var(--muted); font-size: 13px; }
     </style>
     </head>
@@ -130,6 +132,11 @@ data:
           <div class="desc">Storage and volumes</div>
           <div class="url">longhorn.lan.hinkel-net.com</div>
         </a>
+        <a class="card" href="https://photos.lan.hinkel-net.com">
+          <div class="name"><span class="icon">📷</span>Photos (local)<span class="badge">home</span></div>
+          <div class="desc">Direct, no 100 MB upload limit: use for videos</div>
+          <div class="url">photos.lan.hinkel-net.com</div>
+        </a>
         <a class="card" href="https://ha.lan.hinkel-net.com">
           <div class="name"><span class="icon">🏠</span>Home Assistant (local)<span class="badge">home</span></div>
           <div class="desc">Direct, without Cloudflare</div>
@@ -190,6 +197,16 @@ data:
           <tr><td>node2</td><td><code>10.0.20.242</code></td><td>k3s server</td></tr>
           <tr><td>node3</td><td><code>10.0.20.243</code></td><td>k3s server, Z-Wave stick</td></tr>
           <tr><td>switch</td><td><code>10.0.20.249</code></td><td>Netgear GS305EPP, PoE+ to all four Pis</td></tr>
+        </table>
+      </div>
+
+      <h2>Home and internet addresses <small>&middot; at home, the home address is faster and skips Cloudflare</small></h2>
+      <div class="scroll">
+        <table>
+          <tr><th>Site</th><th>At home or on the VPN</th><th>From anywhere</th></tr>
+          <tr><td>Photos</td><td><a href="https://photos.lan.hinkel-net.com">photos.lan.hinkel-net.com</a></td><td><a href="https://photos.hinkel-net.com">photos.hinkel-net.com</a></td></tr>
+          <tr><td>Home Assistant</td><td><a href="https://ha.lan.hinkel-net.com">ha.lan.hinkel-net.com</a></td><td><a href="https://ha.hinkel-net.com">ha.hinkel-net.com</a></td></tr>
+          <tr><td>Homepage</td><td><a href="https://home.lan.hinkel-net.com">home.lan.hinkel-net.com</a></td><td><a href="https://www.hinkel-net.com">www.hinkel-net.com</a></td></tr>
         </table>
       </div>
 
