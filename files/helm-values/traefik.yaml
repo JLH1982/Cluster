@@ -19,3 +19,17 @@ tlsStore:
   default:
     defaultCertificate:
       secretName: lan-wildcard-tls
+# Two copies on different Pis, so a reboot (e.g. the nightly unattended-upgrades one) or a
+# dead Pi doesn't take every site down. The PDB stops a drain from removing both at once.
+deployment:
+  replicas: 2
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: traefik
+        topologyKey: kubernetes.io/hostname

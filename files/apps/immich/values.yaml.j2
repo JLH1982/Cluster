@@ -32,9 +32,11 @@ server:
       strategy: Recreate
       containers:
         main:
+          # 2Gi was too little: thumbnailing large photos/videos (libvips) during bulk uploads
+          # used ~1.8 GB on its own and the server was OOM-killed (503s in the app)
           resources:
-            requests: {cpu: 200m, memory: 512Mi}
-            limits: {memory: 2Gi}
+            requests: {cpu: 200m, memory: 1Gi}
+            limits: {memory: 4Gi}
   ingress:
     main:
       enabled: true

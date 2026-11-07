@@ -39,7 +39,16 @@ spec:
                 secretKeyRef:
                   name: cloudflared-token
                   key: token
+          # Liveness only checks that the process answers: /ready fails whenever the internet is
+          # down, and restarting cloudflared then doesn't help (it reconnects by itself).
           livenessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 2000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
             httpGet:
               path: /ready
               port: 2000

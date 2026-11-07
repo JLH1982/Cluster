@@ -156,22 +156,68 @@ data:
 
     LOGIN_PAGE = """<!doctype html>
     <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Administration - Sign in</title>
+    <title>Sign in | Hinkel Networks Customer Portal</title>
+    <meta name="robots" content="noindex, nofollow">
     <style>
-    body{margin:0;font-family:system-ui,sans-serif;background:#eef1f5;color:#1f2933;display:flex;min-height:100vh;align-items:center;justify-content:center}
-    form{background:#fff;padding:32px;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,.12);width:300px}
-    h1{font-size:20px;margin:0 0 20px}label{display:block;font-size:13px;margin:12px 0 4px}
-    input{width:100%;box-sizing:border-box;padding:9px;border:1px solid #c5ccd6;border-radius:4px;font-size:14px}
-    button{margin-top:20px;width:100%;padding:10px;border:0;border-radius:4px;background:#2f5fd0;color:#fff;font-size:14px}
-    .err{color:#b42318;font-size:13px;margin:0 0 8px}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif;color:#172b4d;background:#f4f6f9;min-height:100vh;display:flex}
+    .brand{flex:1 1 46%;background:linear-gradient(150deg,#0b2545 0%,#13315c 55%,#1d4e89 100%);color:#e8eef7;padding:56px 64px;display:flex;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden}
+    .brand:after{content:"";position:absolute;right:-120px;bottom:-120px;width:420px;height:420px;border-radius:50%;border:56px solid rgba(255,255,255,.05)}
+    .logo{display:flex;align-items:center;gap:12px;font-size:21px;font-weight:600;letter-spacing:.2px}
+    .logo svg{flex:none}
+    .pitch h2{font-size:32px;line-height:1.25;font-weight:600;margin:0 0 16px;max-width:440px}
+    .pitch p{margin:0 0 28px;color:#b9c7dc;font-size:15px;line-height:1.6;max-width:430px}
+    .pitch ul{list-style:none;padding:0;margin:0;font-size:14px;color:#d3ddeb}
+    .pitch li{margin:10px 0;padding-left:26px;position:relative}
+    .pitch li:before{content:"";position:absolute;left:0;top:5px;width:12px;height:7px;border-left:2px solid #5fb3f6;border-bottom:2px solid #5fb3f6;transform:rotate(-45deg)}
+    .small{font-size:12px;color:#8fa3bf}
+    .panel{flex:1 1 54%;display:flex;align-items:center;justify-content:center;padding:40px 24px}
+    form{width:100%;max-width:380px}
+    .mlogo{display:none}
+    h1{font-size:24px;font-weight:600;margin:0 0 6px}
+    .sub{color:#5e6c84;font-size:14px;margin:0 0 26px}
+    label{display:block;font-size:13px;font-weight:600;margin:16px 0 6px;color:#344563}
+    input[type=text],input[type=password]{width:100%;padding:11px 12px;border:1px solid #c1c7d0;border-radius:6px;font-size:15px;background:#fff;color:#172b4d}
+    input:focus{outline:none;border-color:#1d4e89;box-shadow:0 0 0 3px rgba(29,78,137,.15)}
+    .row{display:flex;justify-content:space-between;align-items:center;margin:16px 0 22px;font-size:13px}
+    .row label{display:flex;align-items:center;gap:7px;margin:0;font-weight:400;color:#42526e}
+    a{color:#1d5fa8;text-decoration:none}a:hover{text-decoration:underline}
+    button{width:100%;padding:12px;border:0;border-radius:6px;background:#1d4e89;color:#fff;font-size:15px;font-weight:600;cursor:pointer}
+    button:hover{background:#163d6d}
+    .alt{display:flex;align-items:center;gap:12px;color:#97a0af;font-size:12px;margin:22px 0}
+    .alt:before,.alt:after{content:"";flex:1;border-top:1px solid #dfe1e6}
+    .sso{display:block;text-align:center;padding:11px;border:1px solid #c1c7d0;border-radius:6px;color:#344563;font-size:14px;font-weight:600}
+    .err{display:flex;gap:10px;background:#ffebe6;border:1px solid #ffbdad;color:#bf2600;border-radius:6px;padding:10px 12px;font-size:13px;margin:0 0 6px}
+    .notice{margin-top:26px;font-size:12px;color:#6b778c;line-height:1.5}
+    .foot{margin-top:30px;font-size:12px;color:#97a0af}.foot a{color:#6b778c;margin-right:14px}
+    @media (max-width:860px){.brand{display:none}.mlogo{display:flex;color:#0b2545;margin-bottom:28px}}
     </style></head><body>
-    <form method="post" action="/login">
-    <h1>Administration</h1>
-    ERROR
-    <label for="u">Username</label><input id="u" name="username" autocomplete="username">
-    <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password">
-    <button type="submit">Sign in</button>
-    </form></body></html>
+    <aside class="brand">
+      <div class="logo"><svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="7" fill="#5fb3f6"/><path d="M9 9v16M25 9v16M9 17h16" stroke="#0b2545" stroke-width="3.2" stroke-linecap="round"/><circle cx="9" cy="9" r="2.6" fill="#fff"/><circle cx="25" cy="25" r="2.6" fill="#fff"/></svg>Hinkel Networks</div>
+      <div class="pitch">
+        <h2>Network solutions for business.</h2>
+        <p>Managed networking, security and infrastructure monitoring for growing companies. Manage your services, tickets and devices in one place.</p>
+        <ul><li>24/7 network operations center</li><li>Managed firewalls, Wi-Fi and switching</li><li>Real-time uptime and performance reporting</li></ul>
+      </div>
+      <div class="small">&copy; 2026 Hinkel Networks. All rights reserved.</div>
+    </aside>
+    <main class="panel">
+    <form method="post" action="/login" autocomplete="on">
+      <div class="logo mlogo"><svg width="30" height="30" viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="7" fill="#1d4e89"/><path d="M9 9v16M25 9v16M9 17h16" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/></svg>Hinkel Networks</div>
+      <h1>Sign in</h1>
+      <p class="sub">Customer &amp; Partner Portal</p>
+      ERROR
+      <label for="u">Username or email</label><input id="u" name="username" type="text" autocomplete="username" required>
+      <label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required>
+      <div class="row"><label><input type="checkbox" name="remember" value="1"> Keep me signed in</label><a href="/login?reset=1">Forgot password?</a></div>
+      <button type="submit">Sign in</button>
+      <div class="alt">or</div>
+      <a class="sso" href="/login?sso=1">Sign in with company SSO</a>
+      <p class="notice">This system is for authorized users only. Activity is monitored and logged. Need access? Contact your account manager or <a href="/login?support=1">support</a>.</p>
+      <div class="foot"><a href="/login?privacy=1">Privacy</a><a href="/login?terms=1">Terms</a><a href="/login?status=1">System status</a><span>v4.12.3</span></div>
+    </form>
+    </main>
+    </body></html>
     """
     NOT_FOUND = "<html><head><title>404 Not Found</title></head><body><center><h1>404 Not Found</h1></center><hr><center>nginx</center></body></html>\n"
     LOGIN_PATHS = re.compile(r"^/(|admin|administrator|login|signin|wp-login\.php|wp-admin|user/login|"
@@ -535,7 +581,7 @@ data:
                                    payload=payload))
             if login:
                 time.sleep(1.5)  # like a real password check
-                self.reply(200, LOGIN_PAGE.replace("ERROR", '<p class="err">Invalid username or password.</p>'))
+                self.reply(200, LOGIN_PAGE.replace("ERROR", '<p class="err">The username or password you entered is incorrect. Please try again.</p>'))
             elif LOGIN_PATHS.match(path):
                 self.reply(200, LOGIN_PAGE.replace("ERROR", ""))
             else:

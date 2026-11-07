@@ -1,0 +1,50 @@
+#!/bin/sh
+# Publish the website source folders to the live sites.
+#   sudo publish-sites              both sites
+#   sudo publish-sites portfolio    portfolio.hinkel-net.com, from /portfolio/Portfolio
+#   sudo publish-sites darkweb      the onion site, from /darkweb
+# Copies the folder into the site's volume (new and changed files; nothing is deleted), then checks
+# every file on the live site against the folder. Run on a k3s server (master, node2 or node3).
+set -eu
+
+publish() {
+  name=$1 src=$2 ns=$3 deploy=$4
+  if [ ! -f "$src/index.html" ]; then
+    echo "$name: $src/index.html not found, nothing published" >&2
+    return 1
+  fi
+  echo "$name: publishing $src ..."
+  tar -C "$src" --exclude='*/.*' -cf - . \
+    | kubectl -n "$ns" exec -i "deploy/$deploy" -c nginx -- tar -xof - -C /usr/share/nginx/html
+
+  # Every file in the folder must now be identical on the site
+  want=$(cd "$src" && find . -type f ! -path '*/.*' -exec sha256sum {} + | LC_ALL=C sort -k2)
+  have=$(kubectl -n "$ns" exec "deploy/$deploy" -c nginx -- \
+           sh -c 'cd /usr/share/nginx/html && find . -type f -exec sha256sum {} +' | LC_ALL=C sort -k2)
+  if [ -z "$have" ]; then
+    echo "$name: could not read the files back from the site" >&2
+    return 1
+  fi
+  missing=$(printf '%s\n' "$want" | grep -vxF "$have" || true)
+  if [ -n "$missing" ]; then
+    echo "$name: these files did not publish correctly:" >&2
+    printf '%s\n' "$missing" | awk '{print "  " $2}' >&2
+    return 1
+  fi
+  echo "$name: OK, $(printf '%s\n' "$want" | wc -l) files live"
+
+  # Files on the site that are no longer in the folder (left in place; delete by hand if unwanted)
+  extra=$(printf '%s\n' "$have" | awk '{print $2}' | grep -vxF "$(printf '%s\n' "$want" | awk '{print $2}')" || true)
+  if [ -n "$extra" ]; then
+    echo "$name: on the site but not in $src (not deleted):"
+    printf '%s\n' "$extra" | sed 's/^/  /'
+  fi
+}
+
+case "${1:-all}" in
+  portfolio) publish portfolio /portfolio/Portfolio default website ;;
+  darkweb)   publish darkweb /darkweb darkweb darkweb-website ;;
+  all)       publish portfolio /portfolio/Portfolio default website
+             publish darkweb /darkweb darkweb darkweb-website ;;
+  *)         echo "usage: publish-sites [portfolio|darkweb]" >&2; exit 2 ;;
+esac
